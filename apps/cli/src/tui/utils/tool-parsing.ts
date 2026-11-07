@@ -64,27 +64,82 @@ export interface ReadFilesInfo {
 	files: { path: string; startLine?: number; endLine?: number }[];
 }
 
+function coerceOptionalInt(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return Math.trunc(value);
+	}
+	if (typeof value === "string" && value.trim().length > 0) {
+		const parsed = Number(value.trim());
+		if (Number.isFinite(parsed)) {
+			return Math.trunc(parsed);
+		}
+	}
+	return undefined;
+}
+
 export function parseReadFilesInput(input: unknown): ReadFilesInfo | undefined {
 	if (!isRecord(input)) return undefined;
 
-	if (Array.isArray(input.file_paths)) {
-		return {
-			files: input.file_paths
-				.filter((p): p is string => typeof p === "string")
-				.map((path) => ({ path })),
-		};
+	const pathArray = Array.isArray(input.file_paths)
+		? input.file_paths
+		: Array.isArray(input.paths)
+			? input.paths
+			: undefined;
+	if (pathArray) {
+		const files = pathArray
+			.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+			.map((path) => ({ path }));
+		return files.length > 0 ? { files } : undefined;
 	}
 
 	if (Array.isArray(input.files)) {
+		const files: { path: string; startLine?: number; endLine?: number }[] = [];
+		for (const rawEntry of input.files) {
+			if (typeof rawEntry === "string" && rawEntry.trim().length > 0) {
+				files.push({ path: rawEntry });
+				continue;
+			}
+			if (!isRecord(rawEntry)) continue;
+			const rawPath = rawEntry.path ?? rawEntry.file_path ?? rawEntry.filePath;
+			const path = typeof rawPath === "string" ? rawPath.trim() : "";
+			const startLine = coerceOptionalInt(
+				rawEntry.start_line ?? rawEntry.startLine,
+			);
+			const endLine = coerceOptionalInt(rawEntry.end_line ?? rawEntry.endLine);
+			if (path.length > 0) {
+				files.push({
+					path,
+					...(startLine !== undefined ? { startLine } : {}),
+					...(endLine !== undefined ? { endLine } : {}),
+				});
+			} else if (
+				files.length > 0 &&
+				(startLine !== undefined || endLine !== undefined)
+			) {
+				const previous = files[files.length - 1];
+				if (startLine !== undefined && previous.startLine === undefined) {
+					previous.startLine = startLine;
+				}
+				if (endLine !== undefined && previous.endLine === undefined) {
+					previous.endLine = endLine;
+				}
+			}
+		}
+		return files.length > 0 ? { files } : undefined;
+	}
+
+	const singlePath = input.path ?? input.file_path ?? input.filePath;
+	if (typeof singlePath === "string" && singlePath.trim().length > 0) {
+		const startLine = coerceOptionalInt(input.start_line ?? input.startLine);
+		const endLine = coerceOptionalInt(input.end_line ?? input.endLine);
 		return {
-			files: input.files
-				.filter((f): f is Record<string, unknown> => isRecord(f))
-				.map((f) => ({
-					path: String(f.path ?? ""),
-					startLine:
-						typeof f.start_line === "number" ? f.start_line : undefined,
-					endLine: typeof f.end_line === "number" ? f.end_line : undefined,
-				})),
+			files: [
+				{
+					path: singlePath.trim(),
+					...(startLine !== undefined ? { startLine } : {}),
+					...(endLine !== undefined ? { endLine } : {}),
+				},
+			],
 		};
 	}
 

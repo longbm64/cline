@@ -30,10 +30,49 @@ export interface ReadFilesInfo {
 	files: { path: string; startLine?: number; endLine?: number }[];
 }
 
+export interface ReadFileResultEntry {
+	query?: string;
+	content?: string;
+	lineCount?: number;
+	error?: string;
+}
+
+export interface ReadFilesResultInfo {
+	entries: ReadFileResultEntry[];
+	totalLines?: number;
+	outputText?: string;
+	errorText?: string;
+}
+
+function parseOptionalLineNumber(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return value;
+	}
+	if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+		const parsed = Number(value.trim());
+		if (Number.isSafeInteger(parsed) && parsed >= 1) {
+			return parsed;
+		}
+	}
+	return undefined;
+}
+
+function countTextLines(text: string): number {
+	if (!text) return 0;
+	const trimmedTrailing = text.endsWith("\r\n")
+		? text.slice(0, -2)
+		: text.endsWith("\n")
+			? text.slice(0, -1)
+			: text;
+	return trimmedTrailing ? trimmedTrailing.split(/\r?\n/).length : 1;
+}
+
 /**
  * read_files accepts many input shapes across runtimes: `{ files: [{ path,
- * start_line, end_line }] }`, `{ files: "path" }`, `{ file_paths: [...] }`,
- * `{ paths: [...] }`, a bare array, or a bare string.
+ * start_line, end_line }] }` (with `file_path` / `filePath` aliases, string
+ * line numbers, and orphan `{ start_line, end_line }` entries coalesced onto
+ * the preceding file), `{ files: "path" }`, `{ file_paths: [...] }`,
+ * `{ paths: [...] }`, a single file object, a bare array, or a bare string.
  */
 export function parseReadFilesInput(input: unknown): ReadFilesInfo | undefined {
 	const normalized = normalizeValue(input);
@@ -43,14 +82,44 @@ export function parseReadFilesInput(input: unknown): ReadFilesInfo | undefined {
 			files.push({ path: value });
 			return;
 		}
-		if (isRecord(value) && typeof value.path === "string" && value.path) {
+		if (!isRecord(value)) {
+			return;
+		}
+		const rawPath =
+			typeof value.path === "string" && value.path
+				? value.path
+				: typeof value.file_path === "string" && value.file_path
+					? value.file_path
+					: typeof value.filePath === "string" && value.filePath
+						? value.filePath
+						: undefined;
+		const startLine = parseOptionalLineNumber(
+			value.start_line ?? value.startLine,
+		);
+		const endLine = parseOptionalLineNumber(value.end_line ?? value.endLine);
+		if (rawPath) {
 			files.push({
-				path: value.path,
-				startLine:
-					typeof value.start_line === "number" ? value.start_line : undefined,
-				endLine:
-					typeof value.end_line === "number" ? value.end_line : undefined,
+				path: rawPath,
+				...(startLine !== undefined ? { startLine } : {}),
+				...(endLine !== undefined ? { endLine } : {}),
 			});
+			return;
+		}
+		// Coalesce an orphan `{ start_line, end_line }` range object onto the
+		// immediately preceding file entry when it had no range of its own.
+		if (
+			(startLine !== undefined || endLine !== undefined) &&
+			files.length > 0
+		) {
+			const previous = files[files.length - 1];
+			if (
+				previous &&
+				previous.startLine === undefined &&
+				previous.endLine === undefined
+			) {
+				if (startLine !== undefined) previous.startLine = startLine;
+				if (endLine !== undefined) previous.endLine = endLine;
+			}
 		}
 	};
 
@@ -63,6 +132,156 @@ export function parseReadFilesInput(input: unknown): ReadFilesInfo | undefined {
 		push(candidates);
 	}
 	return files.length > 0 ? { files } : undefined;
+}
+
+/**
+ * Extract per-file line counts, preview text, and per-file errors from a
+ * `read_files` tool result (`ToolOperationResult[]`, plain string, or content
+ * record). Ignores empty placeholder objects (`{}`).
+ */
+export function parseReadFilesResult(
+	result: unknown,
+): ReadFilesResultInfo | undefined {
+	const normalized = normalizeValue(result);
+	if (normalized === null || normalized === undefined) return undefined;
+
+	if (typeof normalized === "string") {
+		const lineCount = countTextLines(normalized);
+		return {
+			entries: [{ content: normalized, lineCount }],
+			totalLines: lineCount,
+			outputText: normalized || undefined,
+		};
+	}
+
+	if (Array.isArray(normalized)) {
+		const isOperationResultArray = normalized.some(
+			(item) =>
+				isRecord(item) &&
+				("result" in item ||
+					"error" in item ||
+					"query" in item ||
+					"success" in item),
+		);
+		if (isOperationResultArray) {
+			const entries: ReadFileResultEntry[] = [];
+			const outputParts: string[] = [];
+			const errorParts: string[] = [];
+			const multiFile = normalized.length > 1;
+
+			for (const item of normalized) {
+				if (!isRecord(item)) continue;
+				const query =
+					typeof item.query === "string" && item.query.trim()
+						? item.query.trim()
+						: undefined;
+				const error =
+					typeof item.error === "string" && item.error.trim()
+						? item.error.trim()
+						: undefined;
+				const rawResult =
+					typeof item.result === "string"
+						? item.result
+						: item.result !== undefined
+							? extractOutputText(item.result)
+							: undefined;
+				const hasContent =
+					typeof rawResult === "string" &&
+					(rawResult.length > 0 || (!error && item.success === true));
+				const lineCount =
+					hasContent && typeof rawResult === "string"
+						? countTextLines(rawResult)
+						: undefined;
+				const content =
+					typeof rawResult === "string" && rawResult.length > 0
+						? rawResult
+						: undefined;
+
+				entries.push({
+					...(query ? { query } : {}),
+					...(content !== undefined ? { content } : {}),
+					...(lineCount !== undefined ? { lineCount } : {}),
+					...(error ? { error } : {}),
+				});
+
+				if (content) {
+					outputParts.push(
+						multiFile && query ? `// ${query}\n${content}` : content,
+					);
+				}
+				if (error) {
+					errorParts.push(multiFile && query ? `${query}: ${error}` : error);
+				}
+			}
+
+			if (entries.length === 0) return undefined;
+			const totalLines = entries.reduce<number | undefined>(
+				(sum, entry) =>
+					typeof entry.lineCount === "number"
+						? (sum ?? 0) + entry.lineCount
+						: sum,
+				undefined,
+			);
+			return {
+				entries,
+				...(totalLines !== undefined ? { totalLines } : {}),
+				...(outputParts.length > 0
+					? { outputText: outputParts.join("\n\n") }
+					: {}),
+				...(errorParts.length > 0
+					? { errorText: errorParts.join("\n") }
+					: {}),
+			};
+		}
+
+		const text = extractOutputArrayText(normalized);
+		if (text) {
+			const lineCount = countTextLines(text);
+			return {
+				entries: [{ content: text, lineCount }],
+				totalLines: lineCount,
+				outputText: text,
+			};
+		}
+		return undefined;
+	}
+
+	if (isRecord(normalized)) {
+		if (typeof normalized.content === "string") {
+			const lineCount = countTextLines(normalized.content);
+			return {
+				entries: [{ content: normalized.content, lineCount }],
+				totalLines: lineCount,
+				outputText: normalized.content || undefined,
+			};
+		}
+		if (Array.isArray(normalized.content)) {
+			const text = extractOutputArrayText(normalized.content);
+			if (text) {
+				const lineCount = countTextLines(text);
+				return {
+					entries: [{ content: text, lineCount }],
+					totalLines: lineCount,
+					outputText: text,
+				};
+			}
+		}
+		if (
+			typeof normalized.result === "string" ||
+			Array.isArray(normalized.result)
+		) {
+			return parseReadFilesResult(normalized.result);
+		}
+		if (typeof normalized.error === "string" && normalized.error.trim()) {
+			const error = normalized.error.trim();
+			return {
+				entries: [{ error }],
+				errorText: error,
+			};
+		}
+	}
+
+	return undefined;
 }
 
 // A read_files call can list the same path more than once, so the raw path is
@@ -448,7 +667,19 @@ function extractOutputArrayText(raw: unknown[]): string | undefined {
 
 		if ("result" in item) {
 			const text = extractOutputText(item.result);
-			if (text) parts.push(text);
+			if (text) {
+				parts.push(text);
+				continue;
+			}
+			if (typeof item.error === "string" && item.error.trim()) {
+				parts.push(item.error.trim());
+				continue;
+			}
+			continue;
+		}
+
+		if (typeof item.error === "string" && item.error.trim()) {
+			parts.push(item.error.trim());
 			continue;
 		}
 

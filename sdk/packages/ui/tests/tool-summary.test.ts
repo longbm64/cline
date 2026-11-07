@@ -111,6 +111,66 @@ describe("read_files summaries", () => {
 		expect(summary.details[0]).toBe(shortenPath(longPath));
 		expect(summary.details[0].startsWith(".../")).toBe(true);
 	});
+
+	it("accepts file_path/filePath aliases, string line numbers, and coalesced range entries", () => {
+		const parsed = parseReadFilesInput({
+			files: [
+				{ file_path: "src/index.ts" },
+				{ start_line: "10", end_line: "40" },
+				{ filePath: "src/utils.ts", startLine: "5", endLine: 25 },
+			],
+		});
+		expect(parsed?.files).toEqual([
+			{ path: "src/index.ts", startLine: 10, endLine: 40 },
+			{ path: "src/utils.ts", startLine: 5, endLine: 25 },
+		]);
+
+		const single = buildToolSummary({
+			toolName: "read_files",
+			input: { file_path: "src/config.ts", start_line: "1", end_line: "20" },
+		});
+		expect(single.label).toBe("Read file config.ts (1–20)");
+	});
+
+	it("extracts per-file line counts, outputText, and errorText from ToolOperationResult[]", () => {
+		const summary = buildToolSummary({
+			toolName: "read_files",
+			input: { file_paths: ["src/a.ts", "src/b.ts"] },
+			result: [
+				{
+					query: "src/a.ts",
+					result: "1\tconst a = 1;\n2\texport default a;\n",
+				},
+				{
+					query: "src/b.ts",
+					result: "1\tconst b = 2;\n2\tconst c = 3;\n3\texport { b, c };",
+				},
+			],
+		});
+		expect(summary.items).toEqual([
+			expect.objectContaining({ path: "src/a.ts", lineCount: 2 }),
+			expect.objectContaining({ path: "src/b.ts", lineCount: 3 }),
+		]);
+		expect(summary.outputText).toContain("// src/a.ts");
+		expect(summary.outputText).toContain("1\tconst a = 1;");
+		expect(summary.outputText).toContain("// src/b.ts");
+	});
+
+	it("surfaces read_files errors from ToolOperationResult[]", () => {
+		const summary = buildToolSummary({
+			toolName: "read_files",
+			input: { file_paths: ["src/missing.ts"] },
+			result: [
+				{
+					query: "src/missing.ts",
+					result: "",
+					error: "ENOENT: no such file or directory",
+				},
+			],
+		});
+		expect(summary.label).toBe("Failed to read file missing.ts");
+		expect(summary.errorText).toBe("ENOENT: no such file or directory");
+	});
 });
 
 describe("run_commands summaries", () => {

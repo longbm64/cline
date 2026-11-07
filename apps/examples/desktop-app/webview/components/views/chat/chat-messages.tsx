@@ -185,9 +185,31 @@ function ChatMessagesImpl({
 			buildToolPresentation(lastConversationMessage).inProgress,
 		[lastConversationMessage],
 	);
+	const streamingMessage = useMemo(
+		() =>
+			streamingMessageId
+				? messages.find((message) => message.id === streamingMessageId)
+				: undefined,
+		[messages, streamingMessageId],
+	);
+	const streamingTextLength = streamingMessage?.content.length ?? 0;
+	const [idleStreamingState, setIdleStreamingState] = useState<{
+		messageId: string;
+		textLength: number;
+	} | null>(null);
+	// When the model finishes streaming a plan/narration paragraph (e.g.
+	// "Kế hoạch xử lý:") and spends several seconds composing tool-call JSON
+	// arguments in the same LLM response, no new text deltas or tool-start
+	// events arrive during that window. Detect the stream pause after 350ms so
+	// the "Thinking..." indicator surfaces immediately below the assistant text.
+	const isStreamingTextIdle =
+		Boolean(streamingMessageId) &&
+		streamingTextLength > 0 &&
+		idleStreamingState?.messageId === streamingMessageId &&
+		idleStreamingState.textLength === streamingTextLength;
 	const isAwaitingFirstOutput =
 		status === "running" &&
-		!streamingMessageId &&
+		(!streamingMessageId || isStreamingTextIdle) &&
 		!lastToolInProgress &&
 		pendingToolApprovals.length === 0 &&
 		pendingAskQuestions.length === 0;
@@ -301,6 +323,25 @@ function ChatMessagesImpl({
 		setCheckpointConfirmation(null);
 		setEditConfirmation(null);
 	}, [sessionId]);
+
+	useEffect(() => {
+		if (
+			status !== "running" ||
+			!streamingMessageId ||
+			streamingTextLength === 0
+		) {
+			return;
+		}
+		const timer = window.setTimeout(() => {
+			setIdleStreamingState({
+				messageId: streamingMessageId,
+				textLength: streamingTextLength,
+			});
+		}, 350);
+		return () => {
+			window.clearTimeout(timer);
+		};
+	}, [status, streamingMessageId, streamingTextLength]);
 
 	useEffect(() => {
 		if (!visibleExpandedImage) {

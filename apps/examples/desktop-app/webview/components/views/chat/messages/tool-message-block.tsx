@@ -45,22 +45,31 @@ type ProceedWhileRunningHandler = (
 function ToolLabel({
 	parts,
 	isRunning,
+	badge,
 }: {
 	parts: ToolLabelPart[];
 	isRunning: boolean;
+	badge?: string;
 }) {
 	return (
-		<span className={cn(isRunning && STREAMING_TITLE_CLASS)}>
-			{parts.map((part, index) =>
-				part.code ? (
-					<span className="font-mono" key={`${index}_${part.text}`}>
-						{part.text}
-					</span>
-				) : (
-					<span key={`${index}_${part.text}`}>{part.text}</span>
-				),
-			)}
-		</span>
+		<>
+			<span className={cn(isRunning && STREAMING_TITLE_CLASS)}>
+				{parts.map((part, index) =>
+					part.code ? (
+						<span className="font-mono" key={`${index}_${part.text}`}>
+							{part.text}
+						</span>
+					) : (
+						<span key={`${index}_${part.text}`}>{part.text}</span>
+					),
+				)}
+			</span>
+			{badge ? (
+				<span className="ml-1.5 text-xs font-normal text-muted-foreground/70">
+					{badge}
+				</span>
+			) : null}
+		</>
 	);
 }
 
@@ -195,12 +204,32 @@ const ToolCallRow = memo(function ToolCallRow({
 		}
 	}, [isProceeding, onProceedWhileRunning, toolCallId, toolSessionId]);
 
-	const hasError = Boolean(payload?.isError);
+	const hasError = Boolean(payload?.isError) || Boolean(summary.errorText);
 	const Icon = getToolNameIcon(toolName);
-	const details = summary.details.map((detail, index) => ({
-		detail,
-		key: `${message.id}_${index}`,
-	}));
+	const readLineCountsByDetail =
+		summary.kind === "read"
+			? summary.items.map((item) =>
+					item.type === "file" ? item.lineCount : undefined,
+				)
+			: [];
+	const totalReadLines = readLineCountsByDetail.reduce<number | undefined>(
+		(acc, count) => (typeof count === "number" ? (acc ?? 0) + count : acc),
+		undefined,
+	);
+	const readLinesBadge =
+		summary.kind === "read" && !isRunning && typeof totalReadLines === "number"
+			? `(${totalReadLines} ${totalReadLines === 1 ? "line" : "lines"})`
+			: undefined;
+	const details = summary.details.map((detail, index) => {
+		const lineCount = readLineCountsByDetail[index];
+		return {
+			detail:
+				typeof lineCount === "number"
+					? `${detail} (${lineCount} ${lineCount === 1 ? "line" : "lines"})`
+					: detail,
+			key: `${message.id}_${index}`,
+		};
+	});
 	const inputPreview =
 		IS_DEBUG && payload ? formatToolValue(payload.input) : "";
 	const hasExpandedSections =
@@ -231,8 +260,14 @@ const ToolCallRow = memo(function ToolCallRow({
 						<Icon className="size-4" />
 					)
 				}
-				label={<ToolLabel isRunning={isRunning} parts={labelParts} />}
-				showDisclosureIcon={false}
+				label={
+					<ToolLabel
+						badge={readLinesBadge}
+						isRunning={isRunning}
+						parts={labelParts}
+					/>
+				}
+				showDisclosureIcon={hasExpandedSections}
 				status={hasError ? "error" : isRunning ? "running" : "success"}
 			/>
 			<ToolActivityContent presentation="rail">

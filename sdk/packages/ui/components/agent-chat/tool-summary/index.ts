@@ -23,6 +23,7 @@ import {
 	parseEditorInput,
 	parseEditorResultDiffCounts,
 	parseReadFilesInput,
+	parseReadFilesResult,
 	parseRunCommandsInput,
 	parseSearchInput,
 	parseSpawnAgentInput,
@@ -51,11 +52,14 @@ export {
 	parseEditorInput,
 	parseEditorResultDiffCounts,
 	parseReadFilesInput,
+	parseReadFilesResult,
 	parseRunCommandsInput,
 	parseSearchInput,
 	parseSpawnAgentInput,
 	parseWebFetchInput,
+	type ReadFileResultEntry,
 	type ReadFilesInfo,
+	type ReadFilesResultInfo,
 	type RunCommandsInfo,
 	type SearchInfo,
 	type SpawnAgentInfo,
@@ -96,6 +100,8 @@ export type ToolSummaryItem =
 			startLine?: number;
 			endLine?: number;
 			language?: string;
+			/** Total lines read for this file when `read_files` result is available. */
+			lineCount?: number;
 			additions?: number;
 			deletions?: number;
 			/** Unified diff text for this file, when reconstructable. */
@@ -437,22 +443,40 @@ export function buildToolSummary(
 
 	if (toolName === "read_files") {
 		const info = parseReadFilesInput(input);
+		const resultInfo = parseReadFilesResult(payload.result);
 		if (info) {
-			const items: ToolSummaryItem[] = info.files.map((file) => ({
-				type: "file",
-				path: file.path,
-				displayPath: formatPath(file.path, opts.pathStyle),
-				startLine: file.startLine,
-				endLine: file.endLine,
-				language: detectLanguage(file.path),
-			}));
+			const items: ToolSummaryItem[] = info.files.map((file, index) => {
+				const lineCount = resultInfo?.entries[index]?.lineCount;
+				return {
+					type: "file",
+					path: file.path,
+					displayPath: formatPath(file.path, opts.pathStyle),
+					startLine: file.startLine,
+					endLine: file.endLine,
+					language: detectLanguage(file.path),
+					...(lineCount !== undefined ? { lineCount } : {}),
+				};
+			});
 			const single = info.files.length === 1 ? info.files[0] : null;
+			const errorText =
+				base.errorText ?? capText(resultInfo?.errorText, opts.maxOutputChars);
+			const singleFailed =
+				!inProgress &&
+				(isError || Boolean(errorText && !resultInfo?.outputText));
 			return {
 				...base,
 				...labeled(
 					single
 						? [
-								{ text: `${inProgress ? "Reading" : "Read"} file ` },
+								{
+									text: `${
+										inProgress
+											? "Reading"
+											: singleFailed
+												? "Failed to read"
+												: "Read"
+									} file `,
+								},
 								{
 									text: `${displayFileName(single.path)}${lineRangeLabelSuffix(single.startLine, single.endLine)}`,
 									code: true,
@@ -474,6 +498,21 @@ export function buildToolSummary(
 					(file) =>
 						`${formatPath(file.path, opts.pathStyle)}${lineRangeDetailSuffix(file.startLine, file.endLine)}`,
 				),
+				outputText: isError
+					? undefined
+					: capText(resultInfo?.outputText, opts.maxOutputChars),
+				...(errorText ? { errorText } : {}),
+			};
+		}
+		if (resultInfo) {
+			const errorText =
+				base.errorText ?? capText(resultInfo.errorText, opts.maxOutputChars);
+			return {
+				...base,
+				outputText: isError
+					? undefined
+					: capText(resultInfo.outputText, opts.maxOutputChars),
+				...(errorText ? { errorText } : {}),
 			};
 		}
 	}

@@ -573,6 +573,40 @@ describe("ChatMessages tool disclosures", () => {
 		expect(container.textContent).toContain("45 tests passed");
 	});
 
+	it("shows line counts and file content preview for read_files on expand", async () => {
+		await renderMessages([
+			{
+				id: "read-preview",
+				sessionId: "session-1",
+				role: "tool",
+				content: JSON.stringify({
+					toolName: "read_files",
+					input: { file_paths: ["src/hello.ts"] },
+					result: [
+						{
+							query: "src/hello.ts",
+							result: "1\tconst greeting = 'hello';\n2\texport default greeting;\n",
+						},
+					],
+				}),
+				createdAt: 1,
+			},
+		]);
+
+		const trigger = [...container.querySelectorAll("button")].find((element) =>
+			element.textContent?.includes("Read file hello.ts"),
+		);
+		expect(trigger).toBeDefined();
+		expect(trigger?.textContent).toContain("(2 lines)");
+		expect(
+			trigger?.querySelector(".cline-chat-disclosure-icon"),
+		).not.toBeNull();
+
+		await act(async () => trigger?.click());
+		expect(container.textContent).toContain("src/hello.ts (2 lines)");
+		expect(container.textContent).toContain("const greeting = 'hello';");
+	});
+
 	it("pre-expands tool groups that contain edit diffs", async () => {
 		await renderMessages([
 			{
@@ -2408,6 +2442,28 @@ describe("ChatMessages thinking indicator", () => {
 		);
 
 		expect(container.textContent).not.toContain("Thinking...");
+	});
+
+	it("shows below streamed assistant text when the stream pauses to compose tool calls", async () => {
+		await renderMessages(
+			[
+				userMessage,
+				{
+					id: "assistant-1",
+					sessionId: "session-1",
+					role: "assistant",
+					content: "Kế hoạch xử lý:",
+					createdAt: 2,
+				},
+			],
+			{ status: "running", streamingMessageId: "assistant-1" },
+		);
+		expect(container.textContent).not.toContain("Thinking...");
+
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 400));
+		});
+		expect(container.textContent).toContain("Thinking...");
 	});
 
 	it("hides while a tool runs", async () => {

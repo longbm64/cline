@@ -277,7 +277,7 @@ export const MessageBubble = memo(function MessageBubble({
 						content={reasoningContent}
 						durationMilliseconds={thoughtDurationMilliseconds}
 						redacted={reasoningRedacted}
-						streaming={isStreaming}
+						streaming={isStreaming && !displayContent}
 					/>
 				) : null}
 

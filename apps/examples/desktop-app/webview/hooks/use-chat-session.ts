@@ -690,6 +690,7 @@ export function useChatSession(environmentId: string) {
 	const providerIdRef = useRef(config.provider);
 	const providerAuthRef = useRef(config.providerAuth);
 	const activeAssistantMessageIdRef = useRef<string | null>(null);
+	const reconcileAssistantMessageIdRef = useRef<string | null>(null);
 	const lastStreamIndexBySessionRef = useRef<Record<string, number>>({});
 	const lastStreamBootBySessionRef = useRef<Record<string, string>>({});
 	const abortedRef = useRef(false);
@@ -837,10 +838,13 @@ export function useChatSession(environmentId: string) {
 				cloudTranscriptUserIdsRef.current[options.sessionId] ?? new Set();
 			const transcriptKnown =
 				cloudTranscriptKnownRef.current[options.sessionId] === true;
+			const preservedAssistantMessageId =
+				activeAssistantMessageIdRef.current ??
+				reconcileAssistantMessageIdRef.current;
 			const preservedMessageIds = options.preserveLiveRouting
 				? new Set([
-						...(activeAssistantMessageIdRef.current
-							? [activeAssistantMessageIdRef.current]
+						...(preservedAssistantMessageId
+							? [preservedAssistantMessageId]
 							: []),
 						...Object.values(liveToolMessageIdsRef.current),
 					])
@@ -1058,6 +1062,7 @@ export function useChatSession(environmentId: string) {
 				return;
 			}
 			activeAssistantMessageIdRef.current = null;
+			reconcileAssistantMessageIdRef.current = null;
 			setActiveAssistantMessageId(null);
 			const epoch = turnEpochRef.current;
 			if (turnEndReconcileTimerRef.current !== null) {
@@ -1764,6 +1769,7 @@ export function useChatSession(environmentId: string) {
 						createdAt: chunkCreatedAt(),
 					});
 					activeAssistantMessageIdRef.current = assistantId;
+					reconcileAssistantMessageIdRef.current = assistantId;
 					setActiveAssistantMessageId(assistantId);
 				}
 				const pending = pendingStreamTextRef.current;
@@ -1788,6 +1794,7 @@ export function useChatSession(environmentId: string) {
 						createdAt: chunkCreatedAt(),
 					});
 					activeAssistantMessageIdRef.current = assistantId;
+					reconcileAssistantMessageIdRef.current = assistantId;
 					setActiveAssistantMessageId(assistantId);
 				}
 				let parsed: ReasoningDeltaEvent = {};
@@ -1893,6 +1900,7 @@ export function useChatSession(environmentId: string) {
 					]);
 				});
 				activeAssistantMessageIdRef.current = null;
+				reconcileAssistantMessageIdRef.current = null;
 				setActiveAssistantMessageId(null);
 				return;
 			}
@@ -1943,6 +1951,7 @@ export function useChatSession(environmentId: string) {
 						: prompt;
 				const promptId = parsed.promptId?.trim();
 				activeAssistantMessageIdRef.current = null;
+				reconcileAssistantMessageIdRef.current = null;
 				setActiveAssistantMessageId(null);
 				clearLiveToolRefs();
 				setStatus("running");
@@ -2127,6 +2136,12 @@ export function useChatSession(environmentId: string) {
 					unpersistedCostUsdRef.current += cost;
 					setTotalCostUsd((previous) => previous + cost);
 				}
+				// The model finished streaming this step's text/reasoning. Clear the
+				// live streaming id so the UI shows the between-step thinking spinner
+				// while tool calls are prepared, while keeping reconcileAssistantMessageIdRef
+				// intact for turn-end RPC reconciliation.
+				activeAssistantMessageIdRef.current = null;
+				setActiveAssistantMessageId(null);
 				return;
 			}
 
@@ -2209,6 +2224,7 @@ export function useChatSession(environmentId: string) {
 				liveToolInputsRef.current[toolCallId] = parsed.input;
 				// Reset so text after this tool call gets a fresh assistant message
 				activeAssistantMessageIdRef.current = null;
+				reconcileAssistantMessageIdRef.current = null;
 				setActiveAssistantMessageId(null);
 				addMessage({
 					id: messageId,
@@ -2399,6 +2415,7 @@ export function useChatSession(environmentId: string) {
 				// its full text into the same bubble; the send's finally block clears it.
 				if (!pendingDirectSendSessionIdsRef.current.has(targetSessionId)) {
 					activeAssistantMessageIdRef.current = null;
+					reconcileAssistantMessageIdRef.current = null;
 					setActiveAssistantMessageId(null);
 				}
 				clearLiveToolRefs();
@@ -2960,6 +2977,7 @@ export function useChatSession(environmentId: string) {
 				delete lastCoreErrorBySessionRef.current[plannedSessionId];
 				activeSessionIdRef.current = plannedSessionId;
 				activeAssistantMessageIdRef.current = null;
+				reconcileAssistantMessageIdRef.current = null;
 				setActiveAssistantMessageId(null);
 				clearLiveToolRefs();
 				setStatus("starting");
@@ -3273,8 +3291,11 @@ export function useChatSession(environmentId: string) {
 				const resolvedAssistantText = rawAssistantText;
 				if (resolvedAssistantText && !newerTurnOwnsTranscript()) {
 					const assistantMessageId =
-						activeAssistantMessageIdRef.current ?? makeId("assistant");
+						activeAssistantMessageIdRef.current ??
+						reconcileAssistantMessageIdRef.current ??
+						makeId("assistant");
 					activeAssistantMessageIdRef.current = assistantMessageId;
+					reconcileAssistantMessageIdRef.current = assistantMessageId;
 					setActiveAssistantMessageId(assistantMessageId);
 					setMessages((prev) => {
 						const updated = updateMessageById(
@@ -3302,8 +3323,11 @@ export function useChatSession(environmentId: string) {
 					fallbackAssistantTurn.reasoningRedacted
 				) {
 					const assistantMessageId =
-						activeAssistantMessageIdRef.current ?? makeId("assistant");
+						activeAssistantMessageIdRef.current ??
+						reconcileAssistantMessageIdRef.current ??
+						makeId("assistant");
 					activeAssistantMessageIdRef.current = assistantMessageId;
+					reconcileAssistantMessageIdRef.current = assistantMessageId;
 					setActiveAssistantMessageId(assistantMessageId);
 					setMessages((prev) => {
 						const updated = updateMessageById(
@@ -3344,8 +3368,11 @@ export function useChatSession(environmentId: string) {
 				);
 				if (fallbackImages.length > 0) {
 					const assistantMessageId =
-						activeAssistantMessageIdRef.current ?? makeId("assistant");
+						activeAssistantMessageIdRef.current ??
+						reconcileAssistantMessageIdRef.current ??
+						makeId("assistant");
 					activeAssistantMessageIdRef.current = assistantMessageId;
+					reconcileAssistantMessageIdRef.current = assistantMessageId;
 					setActiveAssistantMessageId(assistantMessageId);
 					setMessages((prev) => {
 						const updated = updateMessageById(
@@ -3541,7 +3568,9 @@ export function useChatSession(environmentId: string) {
 					unpersistedCostUsdRef.current += unstreamedCostUsd;
 					setTotalCostUsd((previous) => previous + unstreamedCostUsd);
 				}
-				const assistantMessageId = activeAssistantMessageIdRef.current;
+				const assistantMessageId =
+					activeAssistantMessageIdRef.current ??
+					reconcileAssistantMessageIdRef.current;
 				if (
 					assistantMessageId &&
 					(typeof inputTokens === "number" ||
@@ -3690,6 +3719,7 @@ export function useChatSession(environmentId: string) {
 						turnEpochRef.current === turnEpochAtDispatch
 					) {
 						activeAssistantMessageIdRef.current = null;
+						reconcileAssistantMessageIdRef.current = null;
 						setActiveAssistantMessageId(null);
 						clearLiveToolRefs();
 					}
@@ -3796,6 +3826,7 @@ export function useChatSession(environmentId: string) {
 			setError(null);
 			setIsHydratingSession(false);
 			activeAssistantMessageIdRef.current = null;
+			reconcileAssistantMessageIdRef.current = null;
 			setActiveAssistantMessageId(null);
 			setPendingToolApprovals([]);
 			setPendingAskQuestions([]);
@@ -3958,6 +3989,7 @@ export function useChatSession(environmentId: string) {
 		cloudTranscriptUserIdsRef.current = {};
 		shownTurnFailureRef.current = null;
 		activeAssistantMessageIdRef.current = null;
+		reconcileAssistantMessageIdRef.current = null;
 		setActiveAssistantMessageId(null);
 		setActivityLabel(null);
 		setHydratedHistorySessionId(null);
@@ -4024,6 +4056,7 @@ export function useChatSession(environmentId: string) {
 			}));
 			activeSessionIdRef.current = session.sessionId;
 			activeAssistantMessageIdRef.current = null;
+			reconcileAssistantMessageIdRef.current = null;
 			setActiveAssistantMessageId(null);
 			setActivityLabel(null);
 			// A freshly hydrated session has no local turn in flight; without
