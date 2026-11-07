@@ -1477,14 +1477,39 @@ describe("ChatMessages tool disclosures", () => {
 			},
 		);
 
-		const output = container.querySelector('[aria-label="Command output"]');
-		expect(output?.textContent).toContain("Waiting for command output...");
-		expect(container.textContent).toContain("Waiting for command output...");
-
 		await act(async () => {
 			await new Promise((resolve) => setTimeout(resolve, 1100));
 		});
+		const output = container.querySelector('[aria-label="Command output"]');
+		expect(output?.textContent).toContain("Waiting for command output...");
+		expect(container.textContent).toContain("Waiting for command output...");
 		expect(container.textContent).toContain("(1s)");
+	});
+
+	it("renders task completion duration line on the final assistant message when finished", async () => {
+		await renderMessages(
+			[
+				{
+					id: "user-1",
+					sessionId: "session-1",
+					role: "user",
+					content: "Fix focus jitter",
+					createdAt: 1_000,
+				},
+				{
+					id: "assistant-1",
+					sessionId: "session-1",
+					role: "assistant",
+					content: "Đã kiểm tra và hoàn tất.",
+					createdAt: 601_000,
+				},
+			],
+			{ status: "completed" },
+		);
+
+		expect(container.textContent).toContain(
+			"Đã hoàn thành! - Thời gian thực hiện là 10 phút",
+		);
 	});
 
 	it("renders persisted run command output after completion", async () => {

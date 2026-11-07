@@ -171,6 +171,7 @@ const ToolCallRow = memo(function ToolCallRow({
 		(media) => media.modality !== "image",
 	);
 	const publishedFiles = getPublishedArtifacts(message);
+	const hasError = Boolean(payload?.isError) || Boolean(summary.errorText);
 	const [elapsedSeconds, setElapsedSeconds] = useState(0);
 	useEffect(() => {
 		if (!isRunning) return;
@@ -188,16 +189,26 @@ const ToolCallRow = memo(function ToolCallRow({
 		Boolean(submitText) ||
 		summary.outputMedia.length > 0 ||
 		(inProgress &&
-			(Boolean(commandOutput) ||
-				canProceed ||
-				(isCommand && elapsedSeconds >= 1)));
+			(Boolean(commandOutput) || (isCommand && elapsedSeconds >= 1)));
 	const [open, setOpen] = useState(shouldAutoOpen);
 	const [userToggled, setUserToggled] = useState(false);
 	const [isProceeding, setIsProceeding] = useState(false);
 	const [proceedError, setProceedError] = useState<string | null>(null);
 	useEffect(() => {
-		if (shouldAutoOpen && !userToggled) setOpen(true);
-	}, [shouldAutoOpen, userToggled]);
+		if (userToggled) return;
+		if (shouldAutoOpen) {
+			setOpen(true);
+		} else if (!inProgress && isCommand && !commandOutput && !hasError) {
+			setOpen(false);
+		}
+	}, [
+		shouldAutoOpen,
+		userToggled,
+		inProgress,
+		isCommand,
+		commandOutput,
+		hasError,
+	]);
 	const handleOpenChange = useCallback((nextOpen: boolean) => {
 		setUserToggled(true);
 		setOpen(nextOpen);
@@ -219,7 +230,6 @@ const ToolCallRow = memo(function ToolCallRow({
 		}
 	}, [isProceeding, onProceedWhileRunning, toolCallId, toolSessionId]);
 
-	const hasError = Boolean(payload?.isError) || Boolean(summary.errorText);
 	const Icon = getToolNameIcon(toolName);
 	const readLineCountsByDetail =
 		summary.kind === "read"

@@ -31,7 +31,10 @@ import { cn } from "@/lib/utils";
 import { MemoizedMarkdown } from "../../../ui/markdown";
 import { formatChatMessageContent } from "../message-content";
 import { ArtifactImage } from "./artifact-image";
-import { isSystemSteeringMessage } from "./group-messages";
+import {
+	formatTaskCompletionDurationVi,
+	isSystemSteeringMessage,
+} from "./group-messages";
 import { MessageImageCarousel } from "./image-carousel";
 import { ReasoningBlock } from "./reasoning-block";
 
@@ -153,11 +156,15 @@ export const MessageBubble = memo(function MessageBubble({
 	reasoningContent,
 	reasoningRedacted,
 	thoughtDurationMilliseconds,
+	isReasoningStreaming,
+	completionDurationMilliseconds,
 }: {
 	agentRole: AgentMessageRole;
 	message: ChatMessage;
 	runCount?: number;
 	isStreaming?: boolean;
+	isReasoningStreaming?: boolean;
+	completionDurationMilliseconds?: number;
 	onCopyMessage?: (messageId: string, content: string) => void | Promise<void>;
 	onExpandImage?: (image: ChatMessageImage) => void;
 	onEditMessage?: (
@@ -277,7 +284,9 @@ export const MessageBubble = memo(function MessageBubble({
 						content={reasoningContent}
 						durationMilliseconds={thoughtDurationMilliseconds}
 						redacted={reasoningRedacted}
-						streaming={isStreaming && !displayContent}
+						streaming={
+							(isReasoningStreaming ?? isStreaming) && !displayContent
+						}
 					/>
 				) : null}
 
@@ -306,6 +315,19 @@ export const MessageBubble = memo(function MessageBubble({
 								streaming={isStreaming && message.role === "assistant"}
 							/>
 						)}
+					</div>
+				) : null}
+
+				{!isUser &&
+				!isError &&
+				!isStreaming &&
+				completionDurationMilliseconds !== undefined ? (
+					<div className="flex items-center gap-1.5 text-xs font-medium text-emerald-500/90">
+						<Check className="size-3.5 shrink-0" />
+						<span>
+							Đã hoàn thành! - Thời gian thực hiện là{" "}
+							{formatTaskCompletionDurationVi(completionDurationMilliseconds)}
+						</span>
 					</div>
 				) : null}
 

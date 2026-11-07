@@ -36,8 +36,10 @@ import { ImportedSessionNotice } from "./imported-session-notice";
 import { STREAMING_TITLE_CLASS } from "./messages/constants";
 import {
 	buildPreviousTimestampMap,
+	buildTurnCompletionDurationMap,
 	buildUserRunCountMap,
 	collapseCompletedWork,
+	formatWorkDuration,
 	getThoughtDurationMilliseconds,
 	groupChatMessages,
 	isSystemSteeringMessage,
@@ -322,6 +324,19 @@ function ChatMessagesImpl({
 		() => buildUserRunCountMap(messages),
 		[messages],
 	);
+	const turnCompletionDurationByMessageId = useMemo(
+		() =>
+			buildTurnCompletionDurationMap(messages, {
+				collapseTrailingRun:
+					collapseTrailingRun && !streamingMessageId && !isHistoryPreview,
+			}),
+		[messages, collapseTrailingRun, streamingMessageId, isHistoryPreview],
+	);
+	const isShowingThinkingIndicator =
+		(status === "starting" || isAwaitingFirstOutput) &&
+		!isSessionSwitching &&
+		!isHistoryPreview;
+	const [thinkingElapsedSeconds, setThinkingElapsedSeconds] = useState(0);
 	// Shown only once the latest turn finishes; sending the next message
 	// starts a new turn, which hides it until that turn's changes arrive.
 	const showLastTurnReceipt =
@@ -336,6 +351,28 @@ function ChatMessagesImpl({
 		setCheckpointConfirmation(null);
 		setEditConfirmation(null);
 	}, [sessionId]);
+
+	useEffect(() => {
+		if (!isShowingThinkingIndicator) {
+			setThinkingElapsedSeconds(0);
+			return;
+		}
+		setThinkingElapsedSeconds(0);
+		const startedAt = Date.now();
+		const interval = window.setInterval(() => {
+			setThinkingElapsedSeconds(
+				Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
+			);
+		}, 1000);
+		return () => {
+			window.clearInterval(interval);
+		};
+	}, [
+		isShowingThinkingIndicator,
+		messages.length,
+		streamingTextLength,
+		streamingReasoningLength,
+	]);
 
 	useEffect(() => {
 		if (
@@ -683,10 +720,14 @@ function ChatMessagesImpl({
 													child.message.role === "assistant" &&
 													lastConversationMessage === child.message
 												}
-												isStreaming={
+												isStreaming={streamingMessageId === child.message.id}
+												isReasoningStreaming={
 													streamingMessageId === child.message.id &&
 													!isStreamingTextIdle
 												}
+												completionDurationMilliseconds={turnCompletionDurationByMessageId.get(
+													child.message.id,
+												)}
 												key={child.message.id}
 												message={child.message}
 												onCopyMessage={handleCopyMessage}
@@ -757,10 +798,14 @@ function ChatMessagesImpl({
 													message.role === "assistant" &&
 													lastConversationMessage === message
 												}
-												isStreaming={
+												isStreaming={streamingMessageId === message.id}
+												isReasoningStreaming={
 													streamingMessageId === message.id &&
 													!isStreamingTextIdle
 												}
+												completionDurationMilliseconds={turnCompletionDurationByMessageId.get(
+													message.id,
+												)}
 												key={message.id}
 												message={message}
 												runCount={userRunCountByMessage.get(message)}
@@ -848,6 +893,11 @@ function ChatMessagesImpl({
 										<span className={STREAMING_TITLE_CLASS}>
 											{startingLabel ?? activityLabel ?? "Thinking..."}
 										</span>
+										{thinkingElapsedSeconds >= 1 ? (
+											<span className="text-xs font-normal text-muted-foreground/70">
+												({formatWorkDuration(thinkingElapsedSeconds * 1000)})
+											</span>
+										) : null}
 									</MessageScrollerItem>
 								) : null}
 								{pendingToolApprovals.length > 0 ? (

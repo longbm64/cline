@@ -131,7 +131,89 @@ export function getThoughtDurationMilliseconds(
 	return thinkingTimestamp - previousTimestamp;
 }
 
-export { formatThoughtLabel } from "@cline/ui/components/agent-chat";
+export {
+	formatThoughtLabel,
+	formatWorkDuration,
+} from "@cline/ui/components/agent-chat";
+
+export function formatTaskCompletionDurationVi(
+	durationMilliseconds: number,
+): string {
+	const totalSeconds = Math.max(1, Math.round(durationMilliseconds / 1000));
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) {
+		return minutes > 0 ? `${hours} giờ ${minutes} phút` : `${hours} giờ`;
+	}
+	if (minutes > 0) {
+		return seconds > 0 ? `${minutes} phút ${seconds} giây` : `${minutes} phút`;
+	}
+	return `${seconds} giây`;
+}
+
+export function buildTurnCompletionDurationMap(
+	messages: ChatMessage[],
+	{ collapseTrailingRun }: CollapseWorkOptions,
+): Map<string, number> {
+	const durationByMessageId = new Map<string, number>();
+
+	for (let turnStart = 0; turnStart < messages.length; ) {
+		const startMessage = messages[turnStart];
+		if (
+			startMessage.role !== "user" ||
+			isSystemSteeringMessage(startMessage)
+		) {
+			turnStart++;
+			continue;
+		}
+		let turnEnd = turnStart + 1;
+		while (
+			turnEnd < messages.length &&
+			!(
+				messages[turnEnd].role === "user" &&
+				!isSystemSteeringMessage(messages[turnEnd])
+			)
+		) {
+			turnEnd++;
+		}
+		const hasNextTurn = turnEnd < messages.length;
+		const isComplete = hasNextTurn || collapseTrailingRun;
+		if (isComplete) {
+			let lastDeliverable: ChatMessage | undefined;
+			let endTimestamp: number | undefined;
+			for (let i = turnStart + 1; i < turnEnd; i++) {
+				const candidate = messages[i];
+				if (candidate.meta?.messageKind === "plugin_issue") {
+					continue;
+				}
+				if (Number.isFinite(candidate.createdAt)) {
+					endTimestamp =
+						endTimestamp === undefined
+							? candidate.createdAt
+							: Math.max(endTimestamp, candidate.createdAt);
+				}
+				lastDeliverable = candidate;
+			}
+			if (
+				lastDeliverable &&
+				lastDeliverable.role === "assistant" &&
+				Boolean(lastDeliverable.content.trim()) &&
+				Number.isFinite(startMessage.createdAt) &&
+				endTimestamp !== undefined &&
+				endTimestamp >= startMessage.createdAt
+			) {
+				durationByMessageId.set(
+					lastDeliverable.id,
+					endTimestamp - startMessage.createdAt,
+				);
+			}
+		}
+		turnStart = turnEnd;
+	}
+
+	return durationByMessageId;
+}
 
 export type CollapseWorkOptions = {
 	/**
