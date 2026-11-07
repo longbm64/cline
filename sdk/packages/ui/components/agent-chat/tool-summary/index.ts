@@ -25,6 +25,7 @@ import {
 	parseReadFilesInput,
 	parseReadFilesResult,
 	parseRunCommandsInput,
+	parseRunCommandsResult,
 	parseSearchInput,
 	parseSpawnAgentInput,
 	parseWebFetchInput,
@@ -54,6 +55,7 @@ export {
 	parseReadFilesInput,
 	parseReadFilesResult,
 	parseRunCommandsInput,
+	parseRunCommandsResult,
 	parseSearchInput,
 	parseSpawnAgentInput,
 	parseWebFetchInput,
@@ -519,6 +521,9 @@ export function buildToolSummary(
 
 	if (toolName === "run_commands") {
 		const info = parseRunCommandsInput(input);
+		const resultInfo = parseRunCommandsResult(payload.result);
+		const errorText =
+			base.errorText ?? capText(resultInfo?.errorText, opts.maxOutputChars);
 		if (info) {
 			const commands = info.commands.map((command) => command.trim());
 			const singleInline =
@@ -551,7 +556,20 @@ export function buildToolSummary(
 				details: commands,
 				outputText: isError
 					? undefined
-					: capText(extractOutputText(payload.result), opts.maxOutputChars),
+					: capText(
+							resultInfo?.outputText ?? extractOutputText(payload.result),
+							opts.maxOutputChars,
+						),
+				...(errorText ? { errorText } : {}),
+			};
+		}
+		if (resultInfo) {
+			return {
+				...base,
+				outputText: isError
+					? undefined
+					: capText(resultInfo.outputText, opts.maxOutputChars),
+				...(errorText ? { errorText } : {}),
 			};
 		}
 	}

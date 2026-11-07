@@ -1450,6 +1450,43 @@ describe("ChatMessages tool disclosures", () => {
 		);
 	});
 
+	it("shows waiting output state and live elapsed timer for long-running commands without output", async () => {
+		await renderMessages(
+			[
+				{
+					id: "tool-silent-command",
+					sessionId: "session-1",
+					role: "tool",
+					content: JSON.stringify({
+						toolName: "run_commands",
+						input: { commands: ["bun run build"] },
+						result: null,
+					}),
+					createdAt: 1,
+					meta: {
+						toolName: "run_commands",
+						toolCallId: "call-silent",
+						toolDetachable: true,
+						hookEventName: "tool_call_start",
+					},
+				},
+			],
+			{
+				status: "running",
+				onProceedWhileRunning: vi.fn(async () => undefined),
+			},
+		);
+
+		const output = container.querySelector('[aria-label="Command output"]');
+		expect(output?.textContent).toContain("Waiting for command output...");
+		expect(container.textContent).toContain("Waiting for command output...");
+
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 1100));
+		});
+		expect(container.textContent).toContain("(1s)");
+	});
+
 	it("renders persisted run command output after completion", async () => {
 		await renderMessages([
 			{
@@ -2457,6 +2494,29 @@ describe("ChatMessages thinking indicator", () => {
 				},
 			],
 			{ status: "running", streamingMessageId: "assistant-1" },
+		);
+		expect(container.textContent).not.toContain("Thinking...");
+
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 400));
+		});
+		expect(container.textContent).toContain("Thinking...");
+	});
+
+	it("shows below a reasoning-only assistant message when the stream pauses to compose tool calls", async () => {
+		await renderMessages(
+			[
+				userMessage,
+				{
+					id: "assistant-reasoning-pause",
+					sessionId: "session-1",
+					role: "assistant",
+					content: "",
+					reasoning: "Need to run the build command next.",
+					createdAt: 2,
+				},
+			],
+			{ status: "running", streamingMessageId: "assistant-reasoning-pause" },
 		);
 		expect(container.textContent).not.toContain("Thinking...");
 

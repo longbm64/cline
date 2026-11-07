@@ -337,6 +337,60 @@ export function parseRunCommandsInput(
 	return commands.length > 0 ? { commands } : undefined;
 }
 
+export interface RunCommandsResultInfo {
+	outputText?: string;
+	errorText?: string;
+}
+
+/**
+ * Parse a `run_commands` result array (`ToolOperationResult[]`) into output
+ * and error text so command timeouts or non-zero exits surface `errorText`
+ * even when `executeShellCommands` resolves with `success: false`.
+ */
+export function parseRunCommandsResult(
+	result: unknown,
+): RunCommandsResultInfo | undefined {
+	const normalized = normalizeValue(result);
+	const rawEntries = Array.isArray(normalized)
+		? normalized
+		: isRecord(normalized) &&
+				("result" in normalized ||
+					"error" in normalized ||
+					"success" in normalized)
+			? [normalized]
+			: null;
+	if (!rawEntries || rawEntries.length === 0) return undefined;
+
+	const outputs: string[] = [];
+	const errors: string[] = [];
+	let matchedEntry = false;
+
+	for (const rawEntry of rawEntries) {
+		const entry = normalizeValue(rawEntry);
+		if (!isRecord(entry)) continue;
+		if (!("result" in entry || "error" in entry || "success" in entry)) {
+			continue;
+		}
+		matchedEntry = true;
+		const text =
+			typeof entry.result === "string"
+				? entry.result
+				: extractOutputText(entry.result);
+		if (text && text.length > 0) {
+			outputs.push(text);
+		}
+		if (typeof entry.error === "string" && entry.error.trim().length > 0) {
+			errors.push(entry.error.trim());
+		}
+	}
+
+	if (!matchedEntry) return undefined;
+	return {
+		outputText: outputs.length > 0 ? outputs.join("\n\n") : undefined,
+		errorText: errors.length > 0 ? errors.join("\n") : undefined,
+	};
+}
+
 export interface EditorInfo {
 	path: string;
 	oldText?: string;

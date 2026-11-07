@@ -179,12 +179,21 @@ function ChatMessagesImpl({
 					lastErrorMessage.meta?.providerId,
 					lastErrorMessage.meta?.providerAuth,
 				));
-	const lastToolInProgress = useMemo(
-		() =>
-			lastConversationMessage?.role === "tool" &&
-			buildToolPresentation(lastConversationMessage).inProgress,
-		[lastConversationMessage],
-	);
+	const lastToolInProgress = useMemo(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const candidate = messages[i];
+			if (candidate.meta?.messageKind === "plugin_issue") {
+				continue;
+			}
+			if (candidate.role !== "tool") {
+				break;
+			}
+			if (buildToolPresentation(candidate).inProgress) {
+				return true;
+			}
+		}
+		return false;
+	}, [messages]);
 	const streamingMessage = useMemo(
 		() =>
 			streamingMessageId
@@ -193,20 +202,24 @@ function ChatMessagesImpl({
 		[messages, streamingMessageId],
 	);
 	const streamingTextLength = streamingMessage?.content.length ?? 0;
+	const streamingReasoningLength = streamingMessage?.reasoning?.length ?? 0;
 	const [idleStreamingState, setIdleStreamingState] = useState<{
 		messageId: string;
 		textLength: number;
+		reasoningLength: number;
 	} | null>(null);
 	// When the model finishes streaming a plan/narration paragraph (e.g.
-	// "Kế hoạch xử lý:") and spends several seconds composing tool-call JSON
-	// arguments in the same LLM response, no new text deltas or tool-start
-	// events arrive during that window. Detect the stream pause after 350ms so
-	// the "Thinking..." indicator surfaces immediately below the assistant text.
+	// "Kế hoạch xử lý:") or a reasoning trace and spends several seconds
+	// composing tool-call JSON arguments in the same LLM response, no new
+	// text/reasoning deltas or tool-start events arrive during that window.
+	// Detect the stream pause after 350ms so the "Thinking..." indicator
+	// surfaces immediately below the assistant message.
 	const isStreamingTextIdle =
 		Boolean(streamingMessageId) &&
-		streamingTextLength > 0 &&
+		(streamingTextLength > 0 || streamingReasoningLength > 0) &&
 		idleStreamingState?.messageId === streamingMessageId &&
-		idleStreamingState.textLength === streamingTextLength;
+		idleStreamingState.textLength === streamingTextLength &&
+		idleStreamingState.reasoningLength === streamingReasoningLength;
 	const isAwaitingFirstOutput =
 		status === "running" &&
 		(!streamingMessageId || isStreamingTextIdle) &&
@@ -328,7 +341,7 @@ function ChatMessagesImpl({
 		if (
 			status !== "running" ||
 			!streamingMessageId ||
-			streamingTextLength === 0
+			(streamingTextLength === 0 && streamingReasoningLength === 0)
 		) {
 			return;
 		}
@@ -336,12 +349,18 @@ function ChatMessagesImpl({
 			setIdleStreamingState({
 				messageId: streamingMessageId,
 				textLength: streamingTextLength,
+				reasoningLength: streamingReasoningLength,
 			});
 		}, 350);
 		return () => {
 			window.clearTimeout(timer);
 		};
-	}, [status, streamingMessageId, streamingTextLength]);
+	}, [
+		status,
+		streamingMessageId,
+		streamingTextLength,
+		streamingReasoningLength,
+	]);
 
 	useEffect(() => {
 		if (!visibleExpandedImage) {
@@ -664,7 +683,10 @@ function ChatMessagesImpl({
 													child.message.role === "assistant" &&
 													lastConversationMessage === child.message
 												}
-												isStreaming={streamingMessageId === child.message.id}
+												isStreaming={
+													streamingMessageId === child.message.id &&
+													!isStreamingTextIdle
+												}
 												key={child.message.id}
 												message={child.message}
 												onCopyMessage={handleCopyMessage}
@@ -735,7 +757,10 @@ function ChatMessagesImpl({
 													message.role === "assistant" &&
 													lastConversationMessage === message
 												}
-												isStreaming={streamingMessageId === message.id}
+												isStreaming={
+													streamingMessageId === message.id &&
+													!isStreamingTextIdle
+												}
 												key={message.id}
 												message={message}
 												runCount={userRunCountByMessage.get(message)}

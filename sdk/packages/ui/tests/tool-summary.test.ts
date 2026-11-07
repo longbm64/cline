@@ -257,6 +257,25 @@ describe("run_commands summaries", () => {
 		});
 		expect(summary.outputText).toBe("a.txt\nb.txt");
 	});
+
+	it("surfaces command timeout and exit errors from ToolOperationResult[]", () => {
+		const summary = buildToolSummary({
+			toolName: "run_commands",
+			input: { commands: ["bun run build"] },
+			result: [
+				{
+					query: "bun run build",
+					result: "Compiling...",
+					error: "Command failed: Command timed out after 30000ms",
+					success: false,
+				},
+			],
+		});
+		expect(summary.outputText).toBe("Compiling...");
+		expect(summary.errorText).toBe(
+			"Command failed: Command timed out after 30000ms",
+		);
+	});
 });
 
 describe("search / web summaries", () => {

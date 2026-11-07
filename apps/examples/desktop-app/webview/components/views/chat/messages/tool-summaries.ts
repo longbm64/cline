@@ -88,7 +88,10 @@ export function extractRunCommandOutput(value: unknown): string {
 		.map((record) => {
 			const result = recordString(record, "result");
 			const error = recordString(record, "error");
-			const output = result || error;
+			const output =
+				result && error && !result.includes(error)
+					? `${result}\n${error}`
+					: result || error;
 			if (!output) return "";
 			const query = recordString(record, "query");
 			return includeCommand && query ? `$ ${query}\n${output}` : output;

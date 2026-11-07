@@ -2,6 +2,7 @@
 
 import { AgentCommandOutput, GeneratedMediaContent } from "@cline/ui";
 import {
+	formatWorkDuration,
 	ToolActivity,
 	ToolActivityCode,
 	ToolActivityContent,
@@ -170,12 +171,26 @@ const ToolCallRow = memo(function ToolCallRow({
 		(media) => media.modality !== "image",
 	);
 	const publishedFiles = getPublishedArtifacts(message);
+	const [elapsedSeconds, setElapsedSeconds] = useState(0);
+	useEffect(() => {
+		if (!isRunning) return;
+		const startedAt = Date.now();
+		const interval = window.setInterval(() => {
+			setElapsedSeconds(
+				Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
+			);
+		}, 1000);
+		return () => window.clearInterval(interval);
+	}, [isRunning]);
 	const shouldAutoOpen =
 		Boolean(publishedFiles) ||
 		hasFileDiffs ||
 		Boolean(submitText) ||
 		summary.outputMedia.length > 0 ||
-		(inProgress && (Boolean(commandOutput) || canProceed));
+		(inProgress &&
+			(Boolean(commandOutput) ||
+				canProceed ||
+				(isCommand && elapsedSeconds >= 1)));
 	const [open, setOpen] = useState(shouldAutoOpen);
 	const [userToggled, setUserToggled] = useState(false);
 	const [isProceeding, setIsProceeding] = useState(false);
@@ -220,6 +235,11 @@ const ToolCallRow = memo(function ToolCallRow({
 		summary.kind === "read" && !isRunning && typeof totalReadLines === "number"
 			? `(${totalReadLines} ${totalReadLines === 1 ? "line" : "lines"})`
 			: undefined;
+	const durationBadge =
+		elapsedSeconds >= 1 && (isRunning || isCommand)
+			? `(${formatWorkDuration(elapsedSeconds * 1000)})`
+			: undefined;
+	const triggerBadge = readLinesBadge ?? durationBadge;
 	const details = summary.details.map((detail, index) => {
 		const lineCount = readLineCountsByDetail[index];
 		return {
@@ -237,7 +257,7 @@ const ToolCallRow = memo(function ToolCallRow({
 		details.length > 0 ||
 		fileDiffs.length > 0 ||
 		Boolean(submitText) ||
-		Boolean(isCommand ? commandOutput : summary.outputText) ||
+		Boolean(isCommand ? commandOutput || isRunning : summary.outputText) ||
 		summary.outputMedia.length > 0 ||
 		Boolean(summary.errorText) ||
 		Boolean(inputPreview) ||
@@ -262,7 +282,7 @@ const ToolCallRow = memo(function ToolCallRow({
 				}
 				label={
 					<ToolLabel
-						badge={readLinesBadge}
+						badge={triggerBadge}
 						isRunning={isRunning}
 						parts={labelParts}
 					/>
@@ -308,9 +328,15 @@ const ToolCallRow = memo(function ToolCallRow({
 						reportedArtifactIds={reportedArtifactIds}
 						sessionId={message.sessionId}
 					/>
-				) : commandOutput ? (
+				) : commandOutput || (isCommand && isRunning) ? (
 					<AgentCommandOutput isRunning={isRunning} output={commandOutput}>
-						<Ansi>{commandOutput}</Ansi>
+						{commandOutput ? (
+							<Ansi>{commandOutput}</Ansi>
+						) : (
+							<span className="text-zinc-400">
+								Waiting for command output...
+							</span>
+						)}
 					</AgentCommandOutput>
 				) : submitText ? (
 					// The summary is the run's final answer: full foreground color,
@@ -364,29 +390,42 @@ const ToolCallRow = memo(function ToolCallRow({
 						</ToolActivityCode>
 					</div>
 				) : null}
-				{summary.errorText ? (
+				{summary.errorText && summary.errorText !== commandOutput ? (
 					<div className="mt-1 break-words text-destructive">
 						{summary.errorText}
 					</div>
 				) : null}
-				{canProceed ? (
-					<div className="mt-2 space-y-1.5">
-						<Button
-							disabled={isProceeding}
-							onClick={() => void handleProceedWhileRunning()}
-							size="sm"
-							type="button"
-							variant="outline"
-						>
-							{isProceeding ? (
-								<Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-							) : null}
-							Proceed while running
-						</Button>
-						{proceedError ? (
-							<div className="text-xs text-destructive">{proceedError}</div>
+				{isRunning && isCommand ? (
+					<div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+						<div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+							<Loader2 className="size-3.5 animate-spin" />
+							<span>
+								{commandOutput
+									? "Command is running"
+									: "Waiting for command output"}
+								{elapsedSeconds >= 1
+									? ` (${formatWorkDuration(elapsedSeconds * 1000)})`
+									: "..."}
+							</span>
+						</div>
+						{canProceed ? (
+							<Button
+								disabled={isProceeding}
+								onClick={() => void handleProceedWhileRunning()}
+								size="sm"
+								type="button"
+								variant="outline"
+							>
+								{isProceeding ? (
+									<Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+								) : null}
+								Proceed while running
+							</Button>
 						) : null}
 					</div>
+				) : null}
+				{canProceed && proceedError ? (
+					<div className="mt-1 text-xs text-destructive">{proceedError}</div>
 				) : null}
 			</ToolActivityContent>
 		</ToolActivity>
