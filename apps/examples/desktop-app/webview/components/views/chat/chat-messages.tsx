@@ -181,7 +181,7 @@ function ChatMessagesImpl({
 					lastErrorMessage.meta?.providerId,
 					lastErrorMessage.meta?.providerAuth,
 				));
-	const lastToolInProgress = useMemo(() => {
+	const lastToolInProgressLabel = useMemo(() => {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const candidate = messages[i];
 			if (candidate.meta?.messageKind === "plugin_issue") {
@@ -190,12 +190,14 @@ function ChatMessagesImpl({
 			if (candidate.role !== "tool") {
 				break;
 			}
-			if (buildToolPresentation(candidate).inProgress) {
-				return true;
+			const presentation = buildToolPresentation(candidate);
+			if (presentation.inProgress) {
+				return presentation.summary.label;
 			}
 		}
-		return false;
+		return null;
 	}, [messages]);
+	const lastToolInProgress = lastToolInProgressLabel !== null;
 	const streamingMessage = useMemo(
 		() =>
 			streamingMessageId
@@ -333,7 +335,8 @@ function ChatMessagesImpl({
 		[messages, collapseTrailingRun, streamingMessageId, isHistoryPreview],
 	);
 	const isShowingThinkingIndicator =
-		(status === "starting" || isAwaitingFirstOutput) &&
+		(status === "starting" || isAwaitingFirstOutput ||
+			(lastToolInProgress && isRunActive)) &&
 		!isSessionSwitching &&
 		!isHistoryPreview;
 	const [thinkingElapsedSeconds, setThinkingElapsedSeconds] = useState(0);
@@ -879,7 +882,7 @@ function ChatMessagesImpl({
 								    reasoning/tool trigger's geometry exactly (icon slot,
 								    min-height, padding), so the first real row replaces it
 								    in place with no jump. */}
-								{(status === "starting" || isAwaitingFirstOutput) &&
+								{(status === "starting" || isAwaitingFirstOutput || (lastToolInProgress && isRunActive)) &&
 								!isSessionSwitching &&
 								!isHistoryPreview ? (
 									<MessageScrollerItem
@@ -891,7 +894,7 @@ function ChatMessagesImpl({
 									>
 										<Loader2 className="size-4 animate-spin" />
 										<span className={STREAMING_TITLE_CLASS}>
-											{startingLabel ?? activityLabel ?? "Thinking..."}
+											{startingLabel ?? lastToolInProgressLabel ?? activityLabel ?? "Thinking..."}
 										</span>
 										{thinkingElapsedSeconds >= 1 ? (
 											<span className="text-xs font-normal text-muted-foreground/70">

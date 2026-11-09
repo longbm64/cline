@@ -2551,7 +2551,7 @@ describe("ChatMessages thinking indicator", () => {
 		expect(container.textContent).toContain("Thinking...");
 	});
 
-	it("hides while a tool runs", async () => {
+	it("shows the tool label while a tool runs instead of Thinking", async () => {
 		await renderMessages(
 			[
 				userMessage,
@@ -2572,6 +2572,7 @@ describe("ChatMessages thinking indicator", () => {
 		);
 
 		expect(container.textContent).not.toContain("Thinking...");
+		expect(container.textContent).toContain("Reading file");
 	});
 
 	it("shows between a finished tool and the next output", async () => {
@@ -2837,10 +2838,22 @@ describe("ChatMessages last turn receipt", () => {
 		expect(text.indexOf("second answer")).toBeLessThan(
 			text.indexOf("Changed 1 file"),
 		);
+		// The file list is collapsed by default; file buttons are hidden.
+		expect(
+			receipts()[0]?.querySelector<HTMLButtonElement>('[title="docs/b.md"]'),
+		).toBeNull();
+		// Click the "Review" button to open the changes panel.
+		await act(async () => {
+			receipts()[0]
+				?.querySelector<HTMLButtonElement>('[aria-label="Review changes"]')
+				?.click();
+		});
+		expect(onReviewLastTurn).toHaveBeenCalledWith();
+		// Expand the file list by clicking the chevron/header toggle.
 		await act(async () => {
 			receipts()[0]?.querySelector<HTMLButtonElement>("button")?.click();
 		});
-		expect(onReviewLastTurn).toHaveBeenCalledWith();
+		// Now the file button is visible and clicking it reviews that file.
 		await act(async () => {
 			receipts()[0]
 				?.querySelector<HTMLButtonElement>('[title="docs/b.md"]')

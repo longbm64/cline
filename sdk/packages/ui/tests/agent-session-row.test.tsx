@@ -140,7 +140,6 @@ describe("AgentSessionRow host integration", () => {
 	it.each([
 		["pending", true, "bg-cline-ui-warning-solid", false],
 		["provisioning", true, "bg-cline-ui-warning-solid", true],
-		["running", true, "bg-cline-ui-success-solid", false],
 		["idle", true, "bg-cline-ui-info-solid", false],
 		["idle", false, null, false],
 	] as const)("preserves desktop status precedence for %s/unread=%s", async (status, unread, color, pulsing) => {
@@ -156,6 +155,20 @@ describe("AgentSessionRow host integration", () => {
 		} else {
 			expect(dot).toBeNull();
 		}
+	});
+
+	it("renders a spinning loader icon for running status", async () => {
+		await act(async () =>
+			root.render(
+				<AgentSessionRow label="Task" status="running" unread={false} />,
+			),
+		);
+		const spinner = container.querySelector('[aria-label="Running"]');
+		expect(spinner).not.toBeNull();
+		expect(spinner?.classList.contains("animate-spin")).toBe(true);
+		// No static dot should be rendered for running status
+		const dot = container.querySelector('[aria-hidden="true"]');
+		expect(dot).toBeNull();
 	});
 
 	it("keeps rename input and metadata host-owned", async () => {

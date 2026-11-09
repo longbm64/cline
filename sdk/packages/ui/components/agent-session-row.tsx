@@ -1,6 +1,7 @@
 "use client";
 
 import { clsx } from "clsx";
+import { Loader2 } from "lucide-react";
 import {
 	type ComponentPropsWithoutRef,
 	forwardRef,
@@ -60,16 +61,16 @@ export const AgentSessionRow = forwardRef<HTMLDivElement, AgentSessionRowProps>(
 		},
 		ref,
 	) {
-		const statusDotClass =
-			status === "pending"
+		const isRunning = status === "running";
+		const statusDotClass = isRunning
+			? ""
+			: status === "pending"
 				? "bg-cline-ui-warning-solid"
 				: status === "provisioning"
 					? "animate-pulse bg-cline-ui-warning-solid"
-					: status === "running"
-						? "bg-cline-ui-success-solid"
-						: unread
-							? "bg-cline-ui-info-solid"
-							: "";
+					: unread
+						? "bg-cline-ui-info-solid"
+						: "";
 		const navigationClassName = clsx(
 			"group grid h-8 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1 overflow-hidden rounded-cline-ui-md px-2 text-left text-cline-ui-sm font-cline-ui-normal",
 			active
@@ -85,7 +86,12 @@ export const AgentSessionRow = forwardRef<HTMLDivElement, AgentSessionRowProps>(
 					</span>
 				</span>
 				<span className="flex shrink-0 items-center gap-1.5 text-cline-ui-sm text-cline-ui-muted-foreground">
-					{statusDotClass ? (
+					{isRunning ? (
+						<Loader2
+							aria-label="Running"
+							className="size-3 shrink-0 animate-spin text-cline-ui-success-solid"
+						/>
+					) : statusDotClass ? (
 						<span
 							aria-hidden="true"
 							className={clsx("size-1.5 rounded-full", statusDotClass)}
