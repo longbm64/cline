@@ -13,6 +13,9 @@ export const INITIAL_VISIBLE_THREAD_COUNT = 30;
 
 export const SIDEBAR_SORT_STORAGE_KEY = "cline.code.sidebar-sort.v1";
 
+export const SIDEBAR_PROJECT_TIMESTAMPS_STORAGE_KEY =
+	"cline.code.sidebar-project-timestamps.v1";
+
 export type SidebarSortMode = "time" | "project";
 
 export function readSidebarSortModeFromWindow(): SidebarSortMode {
@@ -68,24 +71,122 @@ function uniqueWorkspaceLabel(path: string, workspacePaths: string[]): string {
 	return path;
 }
 
+function readSidebarProjectTimestampsFromWindow(): Record<string, number> {
+	if (typeof window === "undefined") {
+		return {};
+	}
+	try {
+		const raw = window.localStorage.getItem(
+			SIDEBAR_PROJECT_TIMESTAMPS_STORAGE_KEY,
+		);
+		if (!raw) {
+			return {};
+		}
+		const parsed = JSON.parse(raw) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return {};
+		}
+		const result: Record<string, number> = {};
+		for (const [key, value] of Object.entries(
+			parsed as Record<string, unknown>,
+		)) {
+			if (typeof value === "number" && Number.isFinite(value)) {
+				result[key] = value;
+			}
+		}
+		return result;
+	} catch {
+		return {};
+	}
+}
+
+function writeSidebarProjectTimestampsToWindow(
+	timestamps: Record<string, number>,
+): void {
+	if (typeof window === "undefined") {
+		return;
+	}
+	try {
+		window.localStorage.setItem(
+			SIDEBAR_PROJECT_TIMESTAMPS_STORAGE_KEY,
+			JSON.stringify(timestamps),
+		);
+	} catch {
+		// Ignore storage quota or private mode errors.
+	}
+}
+
 export function groupThreadsByProject(
 	threads: SessionThread[],
 ): SidebarProjectGroup[] {
 	const groups = new Map<
 		string,
-		{ workspacePath: string; threads: SessionThread[] }
+		{
+			workspacePath: string;
+			threads: SessionThread[];
+			oldestStartedAt: number;
+			projectStartedAt: number;
+			insertionIndex: number;
+		}
 	>();
+	let nextInsertionIndex = 0;
 	for (const thread of threads) {
 		const workspacePath = thread.workspacePath.trim();
 		const projectId = normalizeWorkspacePath(workspacePath) || "__other__";
+		const threadStartedAt = parseTimestamp(thread.startedAt);
 		const current = groups.get(projectId);
-		if (current) current.threads.push(thread);
-		else groups.set(projectId, { workspacePath, threads: [thread] });
+		if (current) {
+			current.threads.push(thread);
+			if (
+				Number.isFinite(threadStartedAt) &&
+				threadStartedAt < current.oldestStartedAt
+			) {
+				current.oldestStartedAt = threadStartedAt;
+			}
+		} else {
+			groups.set(projectId, {
+				workspacePath,
+				threads: [thread],
+				oldestStartedAt: Number.isFinite(threadStartedAt)
+					? threadStartedAt
+					: Number.POSITIVE_INFINITY,
+				projectStartedAt: Number.NEGATIVE_INFINITY,
+				insertionIndex: nextInsertionIndex++,
+			});
+		}
 	}
-	const workspacePaths = [...groups.values()].map(
-		(group) => group.workspacePath,
-	);
-	return [...groups.entries()].map(([id, group]) => ({
+	const storedTimestamps = readSidebarProjectTimestampsFromWindow();
+	let timestampsUpdated = false;
+	for (const [projectId, group] of groups.entries()) {
+		const stored = storedTimestamps[projectId];
+		if (typeof stored === "number" && Number.isFinite(stored)) {
+			group.projectStartedAt = stored;
+		} else if (Number.isFinite(group.oldestStartedAt)) {
+			group.projectStartedAt = group.oldestStartedAt;
+			storedTimestamps[projectId] = group.oldestStartedAt;
+			timestampsUpdated = true;
+		}
+	}
+	if (timestampsUpdated) {
+		writeSidebarProjectTimestampsToWindow(storedTimestamps);
+	}
+	const orderedEntries = [...groups.entries()].sort(([, left], [, right]) => {
+		const leftHasTime = Number.isFinite(left.projectStartedAt);
+		const rightHasTime = Number.isFinite(right.projectStartedAt);
+		if (
+			leftHasTime &&
+			rightHasTime &&
+			right.projectStartedAt !== left.projectStartedAt
+		) {
+			return right.projectStartedAt - left.projectStartedAt;
+		}
+		if (leftHasTime !== rightHasTime) {
+			return rightHasTime ? 1 : -1;
+		}
+		return left.insertionIndex - right.insertionIndex;
+	});
+	const workspacePaths = orderedEntries.map(([, group]) => group.workspacePath);
+	return orderedEntries.map(([id, group]) => ({
 		id,
 		label: isChatWorkspacePath(group.workspacePath)
 			? "Chat"

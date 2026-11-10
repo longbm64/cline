@@ -165,15 +165,14 @@ export function sessionActivityTimestamp(session: SessionHistoryItem): number {
 	return Math.max(lastActivityAt, endedAt, startedAt);
 }
 
-// Order by last activity, not by start time: a long-running session that was
-// resumed today must outrank one that started later but has been idle for
-// days. This is also the timestamp both the sidebar and the sessions view
-// render, so the list order matches the "1d"/"3d" labels next to each row.
-function compareSessionsByActivityDesc(
+// Order by creation time (startedAt) so each session stays in its initial
+// position from the moment it is created, regardless of subsequent activity,
+// status changes, or follow-up prompts.
+function compareSessionsByStartedAtDesc(
 	a: SessionHistoryItem,
 	b: SessionHistoryItem,
 ): number {
-	const timeDelta = sessionActivityTimestamp(b) - sessionActivityTimestamp(a);
+	const timeDelta = parseTimestamp(b.startedAt) - parseTimestamp(a.startedAt);
 	if (timeDelta !== 0) {
 		return timeDelta;
 	}
@@ -557,33 +556,43 @@ function mergeDiscoveredSessions(
 			getSessionMetadataTitle(session.metadata),
 		]),
 	);
-	return discovered.map((session) => {
-		const existing = currentById.get(sessionKey(session));
-		if (!existing) {
-			return session;
-		}
-		const existingTitle = getSessionMetadataTitle(existing.metadata);
-		if (!existingTitle) {
-			return session;
-		}
-		const incomingTitle = getSessionMetadataTitle(session.metadata);
-		// Cloud refreshes may include web renames; retain cached titles for other runtimes.
-		if (
-			incomingTitle === existingTitle ||
-			(session.origin === "cloud" &&
-				incomingTitle &&
-				existingTitle === titlesBeforeRefresh.get(sessionKey(session)))
-		) {
-			return session;
-		}
-		return {
-			...session,
-			metadata: {
-				...(session.metadata ?? {}),
-				title: existingTitle,
-			},
-		};
-	});
+	return discovered
+		.map((session) => {
+			const existing = currentById.get(sessionKey(session));
+			if (!existing) {
+				return session;
+			}
+			const startedAt = Number.isFinite(parseTimestamp(existing.startedAt))
+				? existing.startedAt
+				: session.startedAt;
+			const existingTitle = getSessionMetadataTitle(existing.metadata);
+			const incomingTitle = getSessionMetadataTitle(session.metadata);
+			// Cloud refreshes may include web renames; retain cached titles for other runtimes.
+			const keepExistingTitle =
+				Boolean(existingTitle) &&
+				incomingTitle !== existingTitle &&
+				!(
+					session.origin === "cloud" &&
+					incomingTitle &&
+					existingTitle === titlesBeforeRefresh.get(sessionKey(session))
+				);
+			if (startedAt === session.startedAt && !keepExistingTitle) {
+				return session;
+			}
+			return {
+				...session,
+				startedAt,
+				...(keepExistingTitle
+					? {
+							metadata: {
+								...(session.metadata ?? {}),
+								title: existingTitle,
+							},
+						}
+					: {}),
+			};
+		})
+		.sort(compareSessionsByStartedAtDesc);
 }
 
 export function useSessionHistory({
@@ -836,7 +845,7 @@ export function useSessionHistory({
 					.filter((session) => Boolean(session.sessionId))
 					.filter(isValidHistorySession)
 					.filter((session) => !session.isSubagent && !session.parentSessionId)
-					.sort(compareSessionsByActivityDesc);
+					.sort(compareSessionsByStartedAtDesc);
 				const mergedSessions = mergeDiscoveredSessions(
 					sessionsRef.current,
 					topLevelSessions,

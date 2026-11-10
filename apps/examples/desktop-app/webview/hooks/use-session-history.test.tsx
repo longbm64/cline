@@ -110,6 +110,46 @@ afterEach(async () => {
 });
 
 describe("useSessionHistory session mapping", () => {
+	it("keeps session positions fixed by creation time across updates", async () => {
+		const older = {
+			...sessionRow("ses-older"),
+			startedAt: "2026-07-20T09:00:00.000Z",
+			endedAt: "2026-07-20T09:10:00.000Z",
+		};
+		const newer = {
+			...sessionRow("ses-newer"),
+			startedAt: "2026-07-20T10:00:00.000Z",
+			endedAt: "2026-07-20T10:05:00.000Z",
+		};
+		await act(async () => root.render(<HookHarness />));
+		await flush();
+		await act(async () => pendingLists[0].resolve([older, newer]));
+		expect(current.threads.map((t) => t.id)).toEqual([
+			sessionKey(newer),
+			sessionKey(older),
+		]);
+
+		// Even when the older session finishes a new turn, gets newer activity, or
+		// a refresh reports a bumped startedAt, its position stays below newer.
+		await flush(12_000);
+		await act(async () =>
+			pendingLists[1].resolve([
+				{
+					...older,
+					startedAt: "2026-07-20T12:00:00.000Z",
+					endedAt: "2026-07-20T12:05:00.000Z",
+					lastActivityAt: "2026-07-20T12:05:00.000Z",
+				},
+				newer,
+			]),
+		);
+		expect(current.threads.map((t) => t.id)).toEqual([
+			sessionKey(newer),
+			sessionKey(older),
+		]);
+		expect(current.sessions[1]?.startedAt).toBe("2026-07-20T09:00:00.000Z");
+	});
+
 	it("accepts refreshed titles without reverting a rename during the refresh", async () => {
 		const row = (title: string) => ({
 			...sessionRow("ses-cloud"),

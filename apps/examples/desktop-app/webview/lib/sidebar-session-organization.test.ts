@@ -32,6 +32,42 @@ function thread(
 }
 
 describe("sidebar session organization", () => {
+	afterEach(() => {
+		window.localStorage.clear();
+	});
+
+	it("keeps project positions fixed when new sessions are created in an older project", () => {
+		const initialThreads = [
+			thread("newer-proj-1", "/work/project-newer", {
+				startedAt: "2026-07-20T10:00:00.000Z",
+			}),
+			thread("older-proj-1", "/work/project-older", {
+				startedAt: "2026-07-20T08:00:00.000Z",
+			}),
+		];
+		expect(
+			groupThreadsByProject(initialThreads).map((group) => group.label),
+		).toEqual(["project-newer", "project-older"]);
+
+		// Creating a brand-new session inside project-older puts that session at
+		// the top of threads, but project-older itself must stay in 2nd place.
+		const afterNewSessionInOlderProject = [
+			thread("older-proj-2", "/work/project-older", {
+				startedAt: "2026-07-20T12:00:00.000Z",
+			}),
+			...initialThreads,
+		];
+		const groups = groupThreadsByProject(afterNewSessionInOlderProject);
+		expect(groups.map((group) => group.label)).toEqual([
+			"project-newer",
+			"project-older",
+		]);
+		expect(groups[1]?.threads.map((item) => item.id)).toEqual([
+			"older-proj-2",
+			"older-proj-1",
+		]);
+	});
+
 	it("groups every loaded thread before applying per-project visibility", () => {
 		const threads = [
 			...Array.from({ length: 12 }, (_, index) =>

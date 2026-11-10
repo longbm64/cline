@@ -6,7 +6,6 @@ import type { JsonRecord } from "../types";
 import {
 	compareSessionRecordsByStartedAtDesc,
 	derivePromptFromMessages,
-	parseTimestamp,
 	resolveSessionListTitle,
 } from "./common";
 import { readPersistedChatMessages } from "./messages";
@@ -64,7 +63,8 @@ export function discoverChatSessions(
 			prompt,
 			messages: session.messages,
 		});
-		const persistedMetadata = store.get(sessionId)?.metadata;
+		const persisted = store.get(sessionId);
+		const persistedMetadata = persisted?.metadata;
 		out.push({
 			sessionId,
 			status: session.status,
@@ -73,7 +73,9 @@ export function discoverChatSessions(
 			cwd: session.config.cwd ?? session.config.workspaceRoot ?? "",
 			workspaceRoot: session.config.workspaceRoot ?? "",
 			prompt,
-			startedAt: String(session.startedAt),
+			startedAt: persisted?.startedAt
+				? String(persisted.startedAt)
+				: String(session.startedAt),
 			endedAt: session.endedAt ? String(session.endedAt) : undefined,
 			metadata: {
 				...(persistedMetadata ?? {}),
@@ -196,20 +198,7 @@ export function mergeDiscoveredSessionLists(
 				"",
 		});
 	}
-	const activityTime = (record: JsonRecord) =>
-		Math.max(
-			...[
-				record.lastActivityAt,
-				record.updatedAt,
-				record.endedAt,
-				record.startedAt,
-			].map((value) => parseTimestamp(value as string | number | undefined)),
-		);
 	return Array.from(merged.values())
-		.sort(
-			(left, right) =>
-				activityTime(right) - activityTime(left) ||
-				compareSessionRecordsByStartedAtDesc(left, right),
-		)
+		.sort(compareSessionRecordsByStartedAtDesc)
 		.slice(0, limit);
 }

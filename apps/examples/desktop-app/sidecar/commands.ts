@@ -645,7 +645,7 @@ function mergePersistedSessionRecord(
 			persisted?.conversationId ??
 			metadata?.conversationId,
 		isSubagent: record.isSubagent ?? persisted?.isSubagent ?? false,
-		startedAt: record.startedAt ?? persisted?.startedAt ?? record.createdAt,
+		startedAt: persisted?.startedAt ?? record.startedAt ?? record.createdAt,
 		updatedAt: record.updatedAt ?? persisted?.updatedAt,
 		metadata: {
 			...((persisted?.metadata && typeof persisted.metadata === "object"
@@ -821,10 +821,10 @@ async function listSessionsFromSidecarManager(
 	return Array.from(byId.values())
 		.sort((left, right) => {
 			const leftTime = Date.parse(
-				String(left.updatedAt ?? left.startedAt ?? ""),
+				String(left.startedAt ?? left.createdAt ?? left.updatedAt ?? ""),
 			);
 			const rightTime = Date.parse(
-				String(right.updatedAt ?? right.startedAt ?? ""),
+				String(right.startedAt ?? right.createdAt ?? right.updatedAt ?? ""),
 			);
 			return (
 				(Number.isNaN(rightTime) ? 0 : rightTime) -

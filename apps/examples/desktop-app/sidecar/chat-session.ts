@@ -456,7 +456,7 @@ function createLiveSession(
 		messages: overrides?.messages ?? [],
 		promptsInQueue: overrides?.promptsInQueue ?? [],
 		busy: false,
-		startedAt: nowMs(),
+		startedAt: overrides?.startedAt ?? nowMs(),
 		status: overrides?.status ?? "idle",
 		prompt: overrides?.prompt,
 		title: overrides?.title,
@@ -1085,6 +1085,7 @@ async function handleStart(
 	const workspaceRoot = startResult.manifest.workspace_root;
 	const cwd = startResult.manifest.cwd;
 	ctx.logger?.log("Desktop chat session started", { sessionId });
+	const existing = ctx.liveSessions.get(sessionId);
 	const session = createLiveSession(
 		{
 			...request.config,
@@ -1094,6 +1095,8 @@ async function handleStart(
 		},
 		{
 			environmentId: binding.environmentId,
+			startedAt:
+				existing?.startedAt ?? isoTimestampToMs(startResult.manifest.started_at),
 			messages: initialMessages,
 			prompt: initialMessages
 				? derivePromptFromMessages(initialMessages)
@@ -1184,6 +1187,7 @@ async function handleAttach(
 		sessionId,
 		createLiveSession(baseAttachedConfig, {
 			environmentId: binding.environmentId,
+			startedAt: isoTimestampToMs(session.startedAt) ?? existing?.startedAt,
 			messages: existing?.messages ?? [],
 			promptsInQueue: existing?.promptsInQueue ?? [],
 			status: session.status,
@@ -2351,10 +2355,8 @@ async function handleRestoreCheckpoint(
 			throw new Error("Checkpoint restore did not return a new session");
 		}
 		restoredSessionId = sessionId;
-		discardAllTrackedAttachments(
-			sourceSessionId,
-			ctx.liveSessions.get(sourceSessionId),
-		);
+		const existing = ctx.liveSessions.get(sourceSessionId);
+		discardAllTrackedAttachments(sourceSessionId, existing);
 		cancelSidecarMistakeQuestions(
 			ctx,
 			sourceSessionId,
@@ -2365,6 +2367,8 @@ async function handleRestoreCheckpoint(
 			sessionId,
 			createLiveSession(requestedConfig, {
 				environmentId: binding.environmentId,
+				startedAt:
+					sessionId === sourceSessionId ? existing?.startedAt : undefined,
 				messages: restoredMessages,
 				prompt: derivePromptFromMessages(restoredMessages),
 				title: readSessionMetadataTitle(sourceSessionId),
