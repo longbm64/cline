@@ -1189,21 +1189,29 @@ describe("ChatMessages tool disclosures", () => {
 	});
 
 	it("preserves single line breaks in user message bubbles", async () => {
+		const rawPrompt = [
+			"fetchStats error: ReferenceError: applyVersionToUI is not defined",
+			"    at fetchStats ((index):1166:11)",
+			"    at async Promise.all (index 0)",
+			"    at async refreshAll ((index):1289:7)",
+			"    at async (index):3178:9",
+		].join("\n");
 		await renderMessages([
 			{
 				id: "multiline-user",
 				sessionId: "session-1",
 				role: "user",
-				content:
-					"giờ mình sẽ thảo luận về lệnh #release\nkhi lệnh #release được gọi thì cần làm các bước sau:\ný kiến của bạn thế nào ?",
+				content: rawPrompt,
 				createdAt: 1,
 			},
 		]);
 
-		const userBubble = container.querySelector(
-			'.cline-chat-message[data-role="user"]',
+		const userText = container.querySelector<HTMLElement>(
+			'.cline-chat-message[data-role="user"] .whitespace-pre-wrap',
 		);
-		expect(userBubble?.querySelectorAll("br")).toHaveLength(2);
+		expect(userText).not.toBeNull();
+		expect(userText?.textContent).toBe(rawPrompt);
+		expect(userText?.classList.contains("leading-5")).toBe(true);
 	});
 
 	it("hides runtime steering notes from the transcript", async () => {

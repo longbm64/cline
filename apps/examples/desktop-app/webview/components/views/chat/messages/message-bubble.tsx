@@ -1,5 +1,6 @@
 "use client";
 
+import { agentComposerTokenClassName } from "@cline/ui";
 import {
 	Message as AgentMessage,
 	type AgentMessageRole,
@@ -15,7 +16,7 @@ import {
 	SplitIcon,
 	UndoIcon,
 } from "lucide-react";
-import { memo, useMemo } from "react";
+import { Fragment, memo } from "react";
 import { Button } from "@/components/ui/button";
 import { resolveCredentialFailureAction } from "@/hooks/chat-session/helpers";
 import type {
@@ -75,8 +76,10 @@ function MessageImages({
 	);
 }
 
-// Chips the same tokens the composer did: known commands, plus mentions the
-// composer saw in search results or the history recorded as attached files.
+// Renders the user's text verbatim (matching the composer textarea's
+// whitespace-pre-wrap + leading-5 layout) while chipping the same tokens the
+// composer did: known commands, plus mentions the composer saw in search
+// results or the history recorded as attached files.
 function UserMessageMarkdown({
 	content,
 	attachedFiles,
@@ -85,24 +88,31 @@ function UserMessageMarkdown({
 	attachedFiles?: string[];
 }) {
 	const { commandNames, mentionPaths } = useKnownComposerTokens();
-	const tokenKey = getComposerHighlights(
+	const highlights = getComposerHighlights(
 		content,
 		commandNames,
 		(path) => mentionPaths.has(path) || Boolean(attachedFiles?.includes(path)),
-	)
-		.map(({ start, end }) => content.slice(start, end))
-		.join("\n");
-	const chipTokens = useMemo(
-		() => new Set(tokenKey ? tokenKey.split("\n") : []),
-		[tokenKey],
 	);
+	let renderedUpTo = 0;
 	return (
-		<MemoizedMarkdown
-			chipTokens={chipTokens}
-			classNames="[&_li]:whitespace-pre-wrap [&_p]:whitespace-pre-wrap"
-			content={content}
-			preserveLineBreaks
-		/>
+		<div
+			className="whitespace-pre-wrap wrap-break-word text-sm leading-5"
+			dir="auto"
+		>
+			{highlights.map(({ start, end }) => {
+				const before = content.slice(renderedUpTo, start);
+				renderedUpTo = end;
+				return (
+					<Fragment key={start}>
+						{before}
+						<span className={agentComposerTokenClassName}>
+							{content.slice(start, end)}
+						</span>
+					</Fragment>
+				);
+			})}
+			{content.slice(renderedUpTo)}
+		</div>
 	);
 }
 
