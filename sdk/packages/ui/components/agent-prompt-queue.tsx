@@ -13,6 +13,7 @@ export interface AgentPromptQueueProps {
 	items: readonly AgentPromptQueueItem[];
 	onEdit: (id: string, prompt: string) => Promise<void> | void;
 	onRemove: (id: string) => Promise<void> | void;
+	onRunInNewSession?: (id: string) => Promise<void> | void;
 	onSteer: (id: string) => Promise<void> | void;
 }
 
@@ -23,6 +24,7 @@ type IconName =
 	| "chevron-right"
 	| "clock"
 	| "pencil"
+	| "plus"
 	| "trash"
 	| "x";
 
@@ -65,6 +67,12 @@ function Icon({ name, small = false }: { name: IconName; small?: boolean }) {
 					<path d="m15 5 4 4" />
 				</>
 			) : null}
+			{name === "plus" ? (
+				<>
+					<path d="M5 12h14" />
+					<path d="M12 5v14" />
+				</>
+			) : null}
 			{name === "trash" ? (
 				<>
 					<path d="M3 6h18" />
@@ -102,6 +110,7 @@ export function AgentPromptQueue({
 	items,
 	onEdit,
 	onRemove,
+	onRunInNewSession,
 	onSteer,
 }: AgentPromptQueueProps) {
 	const [editingId, setEditingId] = useState<string | null>(null);
@@ -144,23 +153,33 @@ export function AgentPromptQueue({
 	);
 
 	const runAction = useCallback(
-		async (item: AgentPromptQueueItem, action: "steer" | "remove") => {
+		async (
+			item: AgentPromptQueueItem,
+			action: "steer" | "remove" | "new-session",
+		) => {
 			if (pendingId) return;
 			setActionError(null);
 			setPendingId(item.id);
 			try {
 				const message = await runHostCallback(
-					() => (action === "steer" ? onSteer(item.id) : onRemove(item.id)),
+					() =>
+						action === "steer"
+							? onSteer(item.id)
+							: action === "new-session"
+								? onRunInNewSession?.(item.id)
+								: onRemove(item.id),
 					action === "steer"
 						? "Could not steer the queued prompt."
-						: "Could not remove the queued prompt.",
+						: action === "new-session"
+							? "Could not start a new session for the queued prompt."
+							: "Could not remove the queued prompt.",
 				);
 				if (message) setActionError({ id: item.id, message });
 			} finally {
 				setPendingId(null);
 			}
 		},
-		[onRemove, onSteer, pendingId],
+		[onRemove, onRunInNewSession, onSteer, pendingId],
 	);
 
 	useEffect(() => {
@@ -305,6 +324,19 @@ export function AgentPromptQueue({
 									</>
 								) : (
 									<>
+										{onRunInNewSession ? (
+											<button
+												aria-label="Run queued prompt in new session"
+												className="cline-ui-agent-prompt-queue__new-session mr-1 inline-flex cursor-pointer items-center gap-1 rounded-cline-ui-md border border-cline-ui-border bg-cline-ui-background px-1.5 py-0.5 font-cline-ui-medium text-cline-ui-foreground text-cline-ui-xxs transition-[color,background-color,border-color] duration-150 ease-[ease] [&>svg]:size-3 enabled:hover:bg-cline-ui-accent focus-visible:outline-2 focus-visible:outline-cline-ui-ring focus-visible:outline-offset-0 disabled:cursor-not-allowed disabled:opacity-50"
+												disabled={isBusy}
+												onClick={() => void runAction(item, "new-session")}
+												title="Run in new session"
+												type="button"
+											>
+												<Icon name="plus" small />
+												<span>New session</span>
+											</button>
+										) : null}
 										{!item.steer ? (
 											<button
 												aria-label="Steer queued prompt"

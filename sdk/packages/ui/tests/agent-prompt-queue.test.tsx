@@ -227,6 +227,53 @@ describe("AgentPromptQueue", () => {
 		expect(container.querySelector('[role="alert"]')).toBeNull();
 	});
 
+	it("renders a new-session action when provided and surfaces failures", async () => {
+		const onRunInNewSession = vi
+			.fn()
+			.mockRejectedValueOnce(new Error(""))
+			.mockResolvedValueOnce(undefined);
+		await act(async () =>
+			root.render(
+				<AgentPromptQueue
+					items={[
+						{
+							attachmentCount: 1,
+							id: "queued-1",
+							prompt: "Run immediately in a new session",
+							steer: false,
+						},
+					]}
+					onEdit={vi.fn()}
+					onRemove={vi.fn()}
+					onRunInNewSession={onRunInNewSession}
+					onSteer={vi.fn()}
+				/>,
+			),
+		);
+
+		const newSessionButton = () =>
+			container.querySelector<HTMLButtonElement>(
+				'[aria-label="Run queued prompt in new session"]',
+			);
+		expect(newSessionButton()?.textContent).toContain("New session");
+
+		await act(async () => {
+			newSessionButton()?.click();
+			await Promise.resolve();
+		});
+		expect(onRunInNewSession).toHaveBeenCalledWith("queued-1");
+		expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+			"Could not start a new session for the queued prompt.",
+		);
+
+		await act(async () => {
+			newSessionButton()?.click();
+			await Promise.resolve();
+		});
+		expect(onRunInNewSession).toHaveBeenCalledTimes(2);
+		expect(container.querySelector('[role="alert"]')).toBeNull();
+	});
+
 	it("renders nothing without queued prompts", async () => {
 		await act(async () =>
 			root.render(

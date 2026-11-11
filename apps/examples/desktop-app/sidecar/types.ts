@@ -62,6 +62,7 @@ export type PromptInQueue = {
 	steer: boolean;
 	attachmentCount?: number;
 	userImages?: string[];
+	userFiles?: Array<{ name: string; content: string }>;
 };
 
 export type LiveSession = {

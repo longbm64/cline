@@ -445,4 +445,55 @@ describe("desktopAppReducer", () => {
 			initialWorkspacePath: "/Users/dev/kaui",
 		});
 	});
+
+	it("creates an auto-send thread as started, clears initialAutoSend once consumed, and binds sessionId", () => {
+		const attachment = new File(["png"], "ui.png", { type: "image/png" });
+		let state = createDesktopAppState("running-thread", settingsSection, "local");
+		state = desktopAppReducer(state, {
+			type: "new-thread",
+			threadId: "queued-auto-thread",
+			environmentId: "local",
+			initialWorkspacePath: "/Users/dev/kaui",
+			initialAutoSend: {
+				prompt: "đổi vị trí 2 khu vực này",
+				attachments: [attachment],
+				configOverrides: {
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					mode: "act",
+				},
+			},
+		});
+
+		expect(state.navigation.current.activeThreadId).toBe("queued-auto-thread");
+		expect(state.threads.at(-1)).toEqual({
+			id: "queued-auto-thread",
+			environmentId: "local",
+			hasStarted: true,
+			initialWorkspacePath: "/Users/dev/kaui",
+			initialAutoSend: {
+				prompt: "đổi vị trí 2 khu vực này",
+				attachments: [attachment],
+				configOverrides: {
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					mode: "act",
+				},
+			},
+		});
+
+		state = desktopAppReducer(state, {
+			type: "consume-initial-prompt-draft",
+			threadId: "queued-auto-thread",
+		});
+		expect(state.threads.at(-1)?.initialAutoSend).toBeUndefined();
+		expect(state.threads.at(-1)?.hasStarted).toBe(true);
+
+		state = desktopAppReducer(state, {
+			type: "thread-started",
+			threadId: "queued-auto-thread",
+			sessionId: "sess-new-123",
+		});
+		expect(state.threads.at(-1)?.sessionId).toBe("sess-new-123");
+	});
 });

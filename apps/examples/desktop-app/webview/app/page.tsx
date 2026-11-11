@@ -2,6 +2,7 @@
 
 import type { HandoffGitPreview } from "@cline/core/cloud";
 import {
+	formatDisplayUserInput,
 	isChatWorkspacePath,
 	type ProviderAuthInfo,
 } from "@cline/shared/browser";
@@ -64,7 +65,10 @@ import {
 } from "@/components/window-title-bar";
 import { AccountProvider, useAccount } from "@/contexts/account-context";
 import { WorkspaceProvider } from "@/contexts/workspace-context";
-import { serializeAttachments } from "@/hooks/chat-session/attachments";
+import {
+	deserializeAttachments,
+	serializeAttachments,
+} from "@/hooks/chat-session/attachments";
 import {
 	getInitialChatConfig,
 	getInitialCloudModel,
@@ -108,6 +112,7 @@ import {
 	createDesktopAppState,
 	type DesktopAppLocation,
 	type DesktopAppView,
+	type DesktopThreadAutoSend,
 	desktopAppReducer,
 } from "@/lib/desktop-app-state";
 import {
@@ -690,6 +695,24 @@ function App() {
 				...(initialWorkspacePath !== undefined ? { initialWorkspacePath } : {}),
 			});
 			requestPromptInputFocus();
+		},
+		[],
+	);
+	const handleRunPromptInNewThread = useCallback(
+		(options: {
+			environmentId: string;
+			initialWorkspacePath?: string;
+			initialAutoSend: DesktopThreadAutoSend;
+		}) => {
+			dispatchApp({
+				type: "new-thread",
+				threadId: makeThreadId(),
+				environmentId: options.environmentId,
+				...(options.initialWorkspacePath !== undefined
+					? { initialWorkspacePath: options.initialWorkspacePath }
+					: {}),
+				initialAutoSend: options.initialAutoSend,
+			});
 		},
 		[],
 	);
@@ -1366,6 +1389,7 @@ function App() {
 													: undefined
 											}
 											initialAttachments={activeThread.initialAttachments}
+											initialAutoSend={activeThread.initialAutoSend}
 											initialPromptDraft={activeThread.initialPromptDraft}
 											initialWorkspacePath={activeThread.initialWorkspacePath}
 											handoffLifecycle={handoffLifecycle}
@@ -1375,6 +1399,7 @@ function App() {
 											onInitialPromptDraftConsumed={
 												handleInitialPromptDraftConsumed
 											}
+											onRunPromptInNewThread={handleRunPromptInNewThread}
 											onUpdateSessionMetadata={(sessionId, metadata) =>
 												handleUpdateSessionMetadata(
 													sessionId,
@@ -1521,11 +1546,13 @@ function ChatThreadPane({
 	historySession,
 	liveHistorySession,
 	initialAttachments,
+	initialAutoSend,
 	initialPromptDraft,
 	initialWorkspacePath,
 	handoffLifecycle,
 	knownWorkspacePaths,
 	onInitialPromptDraftConsumed,
+	onRunPromptInNewThread,
 	onUpdateSessionMetadata,
 	onAddSshHost,
 	onDeleteSession,
@@ -1553,12 +1580,18 @@ function ChatThreadPane({
 	historySession?: SessionHistoryItem;
 	liveHistorySession?: SessionHistoryItem;
 	initialAttachments?: File[];
+	initialAutoSend?: DesktopThreadAutoSend;
 	initialPromptDraft?: string;
 	initialWorkspacePath?: string;
 	handoffLifecycle: Omit<HandoffLifecycle, "onEvent">;
 	confirmHandoffGit: (plan: HandoffGitPreview) => Promise<boolean>;
 	knownWorkspacePaths: string[];
 	onInitialPromptDraftConsumed?: (threadId: string) => void;
+	onRunPromptInNewThread?: (options: {
+		environmentId: string;
+		initialWorkspacePath?: string;
+		initialAutoSend: DesktopThreadAutoSend;
+	}) => void;
 	onUpdateSessionMetadata?: (
 		sessionId: string,
 		metadata: SessionMetadata,
@@ -1632,7 +1665,11 @@ function ChatThreadPane({
 		reset,
 		abort,
 		hydrateSession,
-	} = useChatSession(environmentId, initialWorkspacePath);
+	} = useChatSession(
+		environmentId,
+		initialWorkspacePath,
+		initialAutoSend?.configOverrides,
+	);
 	// Bind the runtime session to the thread so deleting it elsewhere (e.g.
 	// the sidebar) can close this pane even when it was not opened from history.
 	useEffect(() => {
@@ -2281,6 +2318,8 @@ function ChatThreadPane({
 		setDismissedHistorySessionId(null);
 	}, []);
 
+	const consumedAutoSendThreadRef = useRef<string | null>(null);
+
 	useEffect(() => {
 		if (historySession) {
 			resetThreadRef.current = null;
@@ -2305,8 +2344,10 @@ function ChatThreadPane({
 		hydratedSessionRef.current = null;
 		manualTitleSessionRef.current = null;
 		setManualTitle("");
-		void reset();
-	}, [historySession, manualTitle, reset, threadId]);
+		if (!initialAutoSend && consumedAutoSendThreadRef.current !== threadId) {
+			void reset();
+		}
+	}, [historySession, initialAutoSend, manualTitle, reset, threadId]);
 
 	useEffect(() => {
 		if (!historySession) {
@@ -2395,6 +2436,41 @@ function ChatThreadPane({
 		},
 		[isCloudSession, setPendingAttachments],
 	);
+
+	useEffect(() => {
+		if (
+			!initialAutoSend ||
+			historySession ||
+			chatTransportState !== "connected" ||
+			consumedAutoSendThreadRef.current === threadId
+		) {
+			return;
+		}
+		consumedAutoSendThreadRef.current = threadId;
+		const autoSend = initialAutoSend;
+		onInitialPromptDraftConsumed?.(threadId);
+		onThreadStarted?.(threadId);
+		void sendPrompt(autoSend.prompt, autoSend.attachments ?? []).then(
+			(promptTaken) => {
+				if (!promptTaken) {
+					setPromptInput(autoSend.prompt);
+					if (autoSend.attachments?.length) {
+						handleAttachFiles(autoSend.attachments);
+					}
+				}
+			},
+		);
+	}, [
+		chatTransportState,
+		handleAttachFiles,
+		historySession,
+		initialAutoSend,
+		onInitialPromptDraftConsumed,
+		onThreadStarted,
+		sendPrompt,
+		setPromptInput,
+		threadId,
+	]);
 
 	const handleRestoreHandoffDraft = useCallback(
 		async (destination: "local" | "cloud") => {
@@ -2728,6 +2804,64 @@ function ChatThreadPane({
 			await removePromptInQueue(promptId);
 		},
 		[removePromptInQueue],
+	);
+	const handleRunQueuedPromptInNewSession = useCallback(
+		async (promptId: string) => {
+			if (!onRunPromptInNewThread) {
+				return;
+			}
+			const removed = await removePromptInQueue(promptId);
+			if (!removed) {
+				return;
+			}
+			const files = removed.attachedFiles
+				? [...removed.attachedFiles]
+				: deserializeAttachments({
+						userImages: removed.userImages,
+						userFiles: removed.userFiles,
+					});
+			const cleanPrompt = formatDisplayUserInput(removed.prompt);
+			const parsedPromptMode = /<user_input[^>]*mode="(act|plan)"/.exec(
+				removed.prompt,
+			)?.[1] as "act" | "plan" | undefined;
+			const effectiveMode = parsedPromptMode ?? config.mode;
+			const rawWorkspace = isCloudSession
+				? ""
+				: (config.workspaceRoot || config.cwd || "").trim();
+			const nextWorkspace =
+				!isCloudSession && isTaskWorktreePath(rawWorkspace)
+					? readWorkspaceSelectionFromWindow(environmentId).lastWorkspace
+					: rawWorkspace;
+			onRunPromptInNewThread({
+				environmentId,
+				initialWorkspacePath: nextWorkspace,
+				initialAutoSend: {
+					prompt: cleanPrompt,
+					attachments: files,
+					configOverrides: {
+						executionTarget: config.executionTarget,
+						repoUrl: config.repoUrl,
+						branch: config.branch,
+						workspaceRoot: nextWorkspace,
+						cwd: nextWorkspace,
+						provider: config.provider,
+						providerAuth: config.providerAuth,
+						model: config.model,
+						apiKey: config.apiKey,
+						mode: effectiveMode,
+						thinking: config.thinking,
+						reasoningEffort: config.reasoningEffort,
+					},
+				},
+			});
+		},
+		[
+			config,
+			environmentId,
+			isCloudSession,
+			onRunPromptInNewThread,
+			removePromptInQueue,
+		],
 	);
 	const handleApproveToolApproval = useCallback(
 		(requestId: string) => {
@@ -3335,6 +3469,9 @@ function ChatThreadPane({
 			onSteerPromptInQueue={steerPromptInQueue}
 			onEditPromptInQueue={updatePromptInQueue}
 			onRemovePromptInQueue={handleRemoveQueuedPrompt}
+			onRunQueuedPromptInNewSession={
+				onRunPromptInNewThread ? handleRunQueuedPromptInNewSession : undefined
+			}
 			onProviderChange={handleProviderChange}
 			onSend={handleSendPrompt}
 			gitBranch={gitBranch}

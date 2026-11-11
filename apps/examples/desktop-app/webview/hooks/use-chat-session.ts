@@ -595,7 +595,9 @@ function dispatchCoreLog(chunk: string): void {
 export function useChatSession(
 	environmentId: string,
 	initialWorkspacePath?: string,
+	initialConfigOverrides?: Partial<ChatSessionConfig>,
 ) {
+	const initialConfigOverridesRef = useRef(initialConfigOverrides);
 	const subscribeToEnvironment = useCallback(
 		(name: string, listener: (payload: unknown) => void) =>
 			desktopClient.subscribe(name, (payload) => {
@@ -607,9 +609,12 @@ export function useChatSession(
 	const [status, setStatus] = useState<ChatSessionStatus>("idle");
 	const [isHydratingSession, setIsHydratingSession] = useState(false);
 	const [isCloudSessionExpired, setIsCloudSessionExpired] = useState(false);
-	const [config, setConfig] = useState<ChatSessionConfig>(() =>
-		getInitialChatConfig(environmentId, { initialWorkspacePath }),
-	);
+	const [config, setConfig] = useState<ChatSessionConfig>(() => ({
+		...getInitialChatConfig(environmentId, { initialWorkspacePath }),
+		...initialConfigOverrides,
+		sessionId: undefined,
+		environmentId,
+	}));
 	// Swap in the live feed's first free model once it arrives, only while the
 	// config is still the untouched new-user default. Never blocks the UI.
 	// A restored or running session keeps the model it has.
@@ -705,6 +710,17 @@ export function useChatSession(
 	const sessionStartPromiseRef = useRef<Promise<string> | null>(null);
 	const promptDispatchTailRef = useRef<Promise<void>>(Promise.resolve());
 	const pendingQueueSubmissionsRef = useRef(new Map<Promise<void>, string>());
+	const optimisticQueueEntriesRef = useRef(
+		new Map<
+			string,
+			{
+				rawPrompt: string;
+				files: File[];
+				cancelled?: boolean;
+				serverPromptId?: string;
+			}
+		>(),
+	);
 	const activePromptSubmissionsRef = useRef(0);
 	const manualCompactionSessionIdRef = useRef<string | null>(null);
 	const [compactionSessionId, setCompactionSessionId] = useState<string | null>(
@@ -1484,6 +1500,9 @@ export function useChatSession(
 			}
 			if (ctx.taskWorktreeRoot) {
 				registerTaskWorktreeRoot(ctx.taskWorktreeRoot);
+			}
+			if (initialConfigOverridesRef.current?.executionTarget === "cloud") {
+				return;
 			}
 			const explicitWorkspace =
 				initialWorkspacePath !== undefined
@@ -2890,12 +2909,16 @@ export function useChatSession(
 			let promptSubmissionFinished = false;
 			let queuedSubmission: Promise<void> | undefined;
 			let resolveQueuedSubmission: (() => void) | undefined;
+			let optimisticQueuedPromptId: string | null = null;
 			const finishPromptSubmission = () => {
 				if (promptSubmissionFinished) return;
 				promptSubmissionFinished = true;
 				if (queuedSubmission) {
 					pendingQueueSubmissionsRef.current.delete(queuedSubmission);
 					resolveQueuedSubmission?.();
+				}
+				if (optimisticQueuedPromptId) {
+					optimisticQueueEntriesRef.current.delete(optimisticQueuedPromptId);
 				}
 				activePromptSubmissionsRef.current = Math.max(
 					0,
@@ -2953,9 +2976,7 @@ export function useChatSession(
 			const turnCostTracker: TurnCostTracker | undefined = shouldQueue
 				? undefined
 				: { streamedCostUsd: 0 };
-			const optimisticQueuedPromptId = shouldQueue
-				? makeId("queued_prompt")
-				: null;
+			optimisticQueuedPromptId = shouldQueue ? makeId("queued_prompt") : null;
 			const optimisticUserMessageId = shouldQueue ? null : makeId("user");
 			const plannedSessionId = activeSessionId ?? makeId("session");
 			const markCloudOptimisticFailed = () => {
@@ -3011,12 +3032,19 @@ export function useChatSession(
 				// predates this prompt and must not wipe the optimistic queue
 				// entry or flip the session to completed.
 				turnEpochRef.current += 1;
+				optimisticQueueEntriesRef.current.set(optimisticQueuedPromptId, {
+					rawPrompt: trimmed,
+					files: [...attachedFiles],
+				});
 				setPromptsInQueue((prev) => [
 					...prev,
 					{
 						id: optimisticQueuedPromptId,
 						prompt: userLabel,
 						steer: false,
+						...(attachedFiles.length > 0
+							? { attachmentCount: attachedFiles.length }
+							: {}),
 					},
 				]);
 			}
@@ -3196,6 +3224,17 @@ export function useChatSession(
 					setStatus(isManualCompaction ? "running" : "starting");
 				}
 				await precedingPromptDispatch;
+				if (
+					optimisticQueuedPromptId &&
+					optimisticQueueEntriesRef.current.get(optimisticQueuedPromptId)
+						?.cancelled
+				) {
+					setPromptsInQueue((prev) =>
+						prev.filter((item) => item.id !== optimisticQueuedPromptId),
+					);
+					finishPromptSubmission();
+					return true;
+				}
 				turnEpochAtDispatch = turnEpochRef.current;
 				if (!shouldQueue) {
 					pendingDirectSendSessionIdsRef.current.add(activeSessionId);
@@ -3267,6 +3306,15 @@ export function useChatSession(
 					return true;
 				}
 				if (payload.ok && payload.queued) {
+					if (optimisticQueuedPromptId) {
+						const entry = optimisticQueueEntriesRef.current.get(
+							optimisticQueuedPromptId,
+						);
+						const serverId = payload.promptsInQueue?.at(-1)?.id;
+						if (entry && serverId) {
+							entry.serverPromptId = serverId;
+						}
+					}
 					if (settleAbortedSend()) return true;
 					if (turnEpochRef.current !== turnEpochAtDispatch) {
 						// The runtime already started consuming a queued prompt
@@ -4006,6 +4054,8 @@ export function useChatSession(
 				initialWorkspacePath !== undefined
 					? { workspaceRoot: initial.workspaceRoot, cwd: initial.cwd }
 					: {}),
+				...initialConfigOverridesRef.current,
+				environmentId,
 			};
 		});
 		activeSessionIdRef.current = null;
@@ -4441,17 +4491,55 @@ export function useChatSession(
 	const removePromptInQueue = useCallback(
 		async (promptId: string): Promise<PromptInQueue | undefined> => {
 			const activeSessionId = activeSessionIdRef.current;
-			if (isCloudSessionExpired || !activeSessionId || !promptId.trim()) {
+			const trimmedId = promptId.trim();
+			if (isCloudSessionExpired || !activeSessionId || !trimmedId) {
 				return undefined;
+			}
+			let targetPromptId = trimmedId;
+			const optimisticEntry =
+				optimisticQueueEntriesRef.current.get(trimmedId);
+			if (optimisticEntry) {
+				optimisticEntry.cancelled = true;
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					await Promise.race([
+						Promise.all(
+							[...pendingQueueSubmissionsRef.current]
+								.filter(([, sid]) => sid === activeSessionId)
+								.map(([submission]) => submission),
+						),
+						new Promise<void>((resolve) => {
+							timer = setTimeout(resolve, QUEUE_ACKNOWLEDGEMENT_WAIT_MS);
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+				}
+				if (!optimisticEntry.serverPromptId) {
+					setPromptsInQueue((prev) =>
+						prev.filter((item) => item.id !== trimmedId),
+					);
+					return {
+						id: trimmedId,
+						prompt: optimisticEntry.rawPrompt,
+						steer: false,
+						attachmentCount: optimisticEntry.files.length || undefined,
+						attachedFiles: optimisticEntry.files,
+					};
+				}
+				targetPromptId = optimisticEntry.serverPromptId;
 			}
 			const payload = await postSession({
 				action: "remove_pending_prompt",
 				sessionId: activeSessionId,
-				promptId,
+				promptId: targetPromptId,
 			});
 			setPromptsInQueue(
 				Array.isArray(payload.promptsInQueue) ? payload.promptsInQueue : [],
 			);
+			if (payload.removed === false) {
+				return undefined;
+			}
 			return payload.prompt;
 		},
 		[isCloudSessionExpired, postSession, setPromptsInQueue],

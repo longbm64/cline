@@ -1,3 +1,4 @@
+import type { ChatSessionConfig } from "./chat-schema";
 import {
 	createNavigationHistory,
 	type NavigationHistory,
@@ -7,6 +8,12 @@ import type { SessionHistoryItem, SessionMetadata } from "./session-history";
 import { sessionKey } from "./session-identity";
 
 export type DesktopAppView = "chat" | "sessions" | "settings";
+
+export type DesktopThreadAutoSend = {
+	prompt: string;
+	attachments?: File[];
+	configOverrides?: Partial<ChatSessionConfig>;
+};
 
 export type DesktopThread = {
 	id: string;
@@ -23,6 +30,10 @@ export type DesktopThread = {
 	 * - A non-empty string starts in that project directory.
 	 */
 	initialWorkspacePath?: string;
+	/**
+	 * One-shot prompt payload to dispatch immediately once the fresh thread pane mounts.
+	 */
+	initialAutoSend?: DesktopThreadAutoSend;
 };
 
 export type DesktopAppLocation<SettingsSection extends string> = {
@@ -45,6 +56,7 @@ export type DesktopAppAction<SettingsSection extends string> =
 			threadId: string;
 			environmentId: string;
 			initialWorkspacePath?: string;
+			initialAutoSend?: DesktopThreadAutoSend;
 	  }
 	| { type: "bind-unstarted-thread"; threadId: string; environmentId: string }
 	| {
@@ -133,6 +145,12 @@ export function desktopAppReducer<SettingsSection extends string>(
 						environmentId: action.environmentId,
 						...(action.initialWorkspacePath !== undefined
 							? { initialWorkspacePath: action.initialWorkspacePath }
+							: {}),
+						...(action.initialAutoSend !== undefined
+							? {
+									hasStarted: true,
+									initialAutoSend: action.initialAutoSend,
+								}
 							: {}),
 					},
 				],
@@ -256,11 +274,13 @@ export function desktopAppReducer<SettingsSection extends string>(
 				threads: state.threads.map((thread) =>
 					thread.id === action.threadId &&
 					(thread.initialPromptDraft !== undefined ||
-						thread.initialAttachments !== undefined)
+						thread.initialAttachments !== undefined ||
+						thread.initialAutoSend !== undefined)
 						? {
 								...thread,
 								initialPromptDraft: undefined,
 								initialAttachments: undefined,
+								initialAutoSend: undefined,
 							}
 						: thread,
 				),

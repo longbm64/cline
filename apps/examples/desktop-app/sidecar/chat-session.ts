@@ -44,6 +44,7 @@ import {
 	deleteMaterializedAttachments,
 	discardAllTrackedAttachments,
 	materializeUserFiles,
+	readMaterializedAttachments,
 	trackQueuedAttachments,
 } from "./attachments";
 import { createDesktopExtensionContext } from "./client-context";
@@ -2491,14 +2492,27 @@ async function handleRemovePendingPrompt(
 		sessionId,
 		promptId,
 	});
+	let removedUserFiles: Array<{ name: string; content: string }> | undefined;
 	if (result.removed === true) {
+		removedUserFiles = readMaterializedAttachments(
+			sessionId,
+			result.prompt?.userFiles,
+		);
 		deleteMaterializedAttachments(sessionId, result.prompt?.userFiles);
 		ctx.liveSessions.get(sessionId)?.queuedAttachmentFiles?.delete(promptId);
 	}
 	return {
 		sessionId,
 		removed: result.removed === true,
-		prompt: result.prompt ? mapPendingPrompt(result.prompt) : undefined,
+		prompt:
+			result.removed === true && result.prompt
+				? {
+						...mapPendingPrompt(result.prompt),
+						...(removedUserFiles?.length
+							? { userFiles: removedUserFiles }
+							: {}),
+					}
+				: undefined,
 		promptsInQueue: applyPendingPrompts(ctx, sessionId, result.prompts),
 	};
 }

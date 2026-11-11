@@ -196,4 +196,7 @@ export type PromptInQueue = {
 	prompt: string;
 	steer: boolean;
 	attachmentCount?: number;
+	userImages?: string[];
+	userFiles?: SerializedAttachmentFile[];
+	attachedFiles?: File[];
 };

@@ -10,6 +10,13 @@
 	font: inherit;
 }
 
+.cline-ui-agent-prompt-queue__new-session {
+	border-style: solid;
+	font-family: inherit;
+	font-style: inherit;
+	font-variant: inherit;
+}
+
 .cline-ui-agent-prompt-queue__editor {
 	border-style: solid;
 	font-weight: inherit;

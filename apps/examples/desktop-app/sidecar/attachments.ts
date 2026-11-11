@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { SessionPendingPrompt } from "@cline/core";
@@ -53,6 +53,36 @@ export function materializeUserFiles(
 		writeFileSync(path, file.content, "utf8");
 		return path;
 	});
+}
+
+const MATERIALIZED_UUID_PREFIX_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i;
+
+/**
+ * Read materialized attachment files before they are deleted so a removed
+ * queued prompt can be transferred intact (e.g. run in a new session).
+ */
+export function readMaterializedAttachments(
+	sessionId: string,
+	paths: string[] | undefined,
+): ChatTurnAttachments["userFiles"] {
+	if (!paths?.length) return undefined;
+	const attachmentDir = resolve(sessionAttachmentsDir(sessionId)) + sep;
+	const files: NonNullable<ChatTurnAttachments["userFiles"]> = [];
+	for (const path of paths) {
+		if (!resolve(path).startsWith(attachmentDir)) continue;
+		try {
+			const content = readFileSync(path, "utf8");
+			const rawName = basename(path).replace(MATERIALIZED_UUID_PREFIX_RE, "");
+			files.push({
+				name: rawName || "attachment.txt",
+				content,
+			});
+		} catch {
+			// Skip missing or unreadable attachment files.
+		}
+	}
+	return files.length > 0 ? files : undefined;
 }
 
 /**

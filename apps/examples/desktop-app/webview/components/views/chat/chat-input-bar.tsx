@@ -365,6 +365,7 @@ type ChatInputBarProps = {
 		prompt: string,
 	) => Promise<void> | void;
 	onRemovePromptInQueue: (promptId: string) => Promise<void> | void;
+	onRunQueuedPromptInNewSession?: (promptId: string) => Promise<void> | void;
 	onOpenModelSettings?: () => void;
 	/** Opens Settings → Local Models from the local model chip. */
 	onOpenLocalModels?: () => void;
@@ -419,6 +420,7 @@ function ChatInputBarImpl({
 	onSteerPromptInQueue,
 	onEditPromptInQueue,
 	onRemovePromptInQueue,
+	onRunQueuedPromptInNewSession,
 	onOpenModelSettings,
 	onOpenLocalModels,
 	summary,
@@ -1258,6 +1260,9 @@ function ChatInputBarImpl({
 					items={displayPromptsInQueue}
 					onEdit={onEditPromptInQueue}
 					onRemove={onRemovePromptInQueue}
+					onRunInNewSession={
+						readOnly ? undefined : onRunQueuedPromptInNewSession
+					}
 					onSteer={onSteerPromptInQueue}
 				/>
 				<div className="relative">

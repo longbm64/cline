@@ -1373,11 +1373,20 @@ describe("first-send connection updates", () => {
 					?.queuedAttachmentFiles?.get("pending_1"),
 			).toEqual([filePath]);
 
-			await handleChatSessionCommand(ctx, {
+			const removedPayload = (await handleChatSessionCommand(ctx, {
 				action: "remove_pending_prompt",
 				sessionId,
 				promptId: "pending_1",
-			});
+			})) as {
+				removed?: boolean;
+				prompt?: {
+					userFiles?: Array<{ name: string; content: string }>;
+				};
+			};
+			expect(removedPayload.removed).toBe(true);
+			expect(removedPayload.prompt?.userFiles).toEqual([
+				{ name: "notes.txt", content: "hello" },
+			]);
 			expect(existsSync(filePath)).toBe(false);
 			expect(
 				ctx.liveSessions.get(sessionId)?.queuedAttachmentFiles?.size ?? 0,

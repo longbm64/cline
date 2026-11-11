@@ -8,6 +8,7 @@ import {
 	flushConsumedAttachments,
 	markQueuedAttachmentsSubmitted,
 	materializeUserFiles,
+	readMaterializedAttachments,
 	reconcileQueuedAttachments,
 	sessionAttachmentsDir,
 	trackQueuedAttachments,
@@ -124,6 +125,22 @@ describe("materialized attachment lifecycle", () => {
 		trackQueuedAttachments(session, [], files);
 		expect(session.queuedAttachmentFiles?.size ?? 0).toBe(0);
 		expect(session.consumedAttachmentFiles?.size).toBe(1);
+	});
+
+	it("reads materialized files back with original names and ignores outside paths", () => {
+		const staged = materializeUserFiles(sessionId, [
+			{ name: "layout-plan.md", content: "đổi vị trí 2 khu vực" },
+		]) as string[];
+		const outside = join(testSessionDataDir, "outside.txt");
+		writeFileSync(outside, "secret", "utf8");
+
+		const recovered = readMaterializedAttachments(sessionId, [
+			...staged,
+			outside,
+		]);
+		expect(recovered).toEqual([
+			{ name: "layout-plan.md", content: "đổi vị trí 2 khu vực" },
+		]);
 	});
 
 	it("discards all tracked files on session end", () => {
