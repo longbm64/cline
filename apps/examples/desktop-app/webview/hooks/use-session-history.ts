@@ -21,7 +21,11 @@ import {
 	PINNED_METADATA_KEY,
 } from "@/lib/session-history";
 import { eventEnvironmentId, sessionKey } from "@/lib/session-identity";
-import { LOCAL_WORKSPACE_ENVIRONMENT_ID } from "@/lib/workspace-paths";
+import {
+	LOCAL_WORKSPACE_ENVIRONMENT_ID,
+	matchesScopedProject,
+	readScopedProjectFromWindow,
+} from "@/lib/workspace-paths";
 
 type CliDiscoveredSession = Omit<SessionHistoryItem, "status"> & {
 	status: string;
@@ -633,7 +637,9 @@ export function useSessionHistory({
 	const [scheduledSessionLinks, setScheduledSessionLinks] = useState<
 		Map<string, ScheduledSessionLink>
 	>(() => new Map());
-	const fetchLimitRef = useRef(INITIAL_HISTORY_FETCH_LIMIT);
+	const fetchLimitRef = useRef(
+		readScopedProjectFromWindow() ? 250 : INITIAL_HISTORY_FETCH_LIMIT,
+	);
 	// Limit of the most recent refresh that actually returned sessions. Failed
 	// attempts roll back to this rather than to a caller-local snapshot, which
 	// may itself name a batch that was never fetched.
@@ -845,6 +851,9 @@ export function useSessionHistory({
 					.filter((session) => Boolean(session.sessionId))
 					.filter(isValidHistorySession)
 					.filter((session) => !session.isSubagent && !session.parentSessionId)
+					.filter((session) =>
+						matchesScopedProject(session.workspaceRoot || session.cwd || ""),
+					)
 					.sort(compareSessionsByStartedAtDesc);
 				const mergedSessions = mergeDiscoveredSessions(
 					sessionsRef.current,

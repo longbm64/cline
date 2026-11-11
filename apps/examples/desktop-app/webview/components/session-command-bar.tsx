@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/command";
 import { desktopClient } from "@/lib/desktop-client";
 import { formatAccelerator, useKeybindings } from "@/lib/keybindings";
+import { matchesScopedProject } from "@/lib/workspace-paths";
 
 type SessionSearchHit = {
 	sessionId: string;
@@ -82,11 +83,13 @@ export function SessionCommandBar({
 				.then((results) => {
 					if (!cancelled) {
 						setHits(
-							results.map((hit) => ({
-								...hit,
-								title: formatSessionSearchTitle(hit.title),
-								snippet: formatSessionSearchPreview(hit.role, hit.snippet),
-							})),
+							results
+								.filter((hit) => matchesScopedProject(hit.workspaceRoot ?? ""))
+								.map((hit) => ({
+									...hit,
+									title: formatSessionSearchTitle(hit.title),
+									snippet: formatSessionSearchPreview(hit.role, hit.snippet),
+								})),
 						);
 						setVisibleHitCount(SESSION_SEARCH_RESULT_BATCH_SIZE);
 					}

@@ -17,6 +17,12 @@ export type DesktopThread = {
 	hasStarted?: boolean;
 	initialPromptDraft?: string;
 	initialAttachments?: File[];
+	/**
+	 * Explicit workspace path override when creating a thread:
+	 * - `""` starts in "Just chat" mode (no workspace directory bound).
+	 * - A non-empty string starts in that project directory.
+	 */
+	initialWorkspacePath?: string;
 };
 
 export type DesktopAppLocation<SettingsSection extends string> = {
@@ -34,7 +40,12 @@ export type DesktopAppAction<SettingsSection extends string> =
 	| { type: "navigate"; destination: DesktopAppLocation<SettingsSection> }
 	| { type: "back" }
 	| { type: "forward" }
-	| { type: "new-thread"; threadId: string; environmentId: string }
+	| {
+			type: "new-thread";
+			threadId: string;
+			environmentId: string;
+			initialWorkspacePath?: string;
+	  }
 	| { type: "bind-unstarted-thread"; threadId: string; environmentId: string }
 	| {
 			type: "select-environment-draft";
@@ -117,7 +128,13 @@ export function desktopAppReducer<SettingsSection extends string>(
 			return {
 				threads: [
 					...state.threads,
-					{ id: action.threadId, environmentId: action.environmentId },
+					{
+						id: action.threadId,
+						environmentId: action.environmentId,
+						...(action.initialWorkspacePath !== undefined
+							? { initialWorkspacePath: action.initialWorkspacePath }
+							: {}),
+					},
 				],
 				navigation: navigationHistoryReducer(state.navigation, {
 					type: "navigate",

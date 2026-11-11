@@ -16,6 +16,7 @@ import {
 	Clock3,
 	Cloud,
 	Cpu,
+	ExternalLink,
 	Filter,
 	FolderTree,
 	GitFork,
@@ -106,7 +107,8 @@ import {
 	isBetaVersion,
 	productNameForVersion,
 } from "@/lib/app-channel";
-import { desktopClient } from "@/lib/desktop-client";
+import { isChatWorkspacePath } from "@cline/shared/browser";
+import { desktopClient, isTauriAvailable } from "@/lib/desktop-client";
 import { formatAccelerator, useKeybindings } from "@/lib/keybindings";
 import {
 	ALL_SESSION_SOURCES,
@@ -129,7 +131,12 @@ import {
 } from "@/lib/sidebar-session-organization";
 import { cn } from "@/lib/utils";
 import { TASK_WORKTREE_DELETE_WARNING } from "@/lib/work-in-selection";
-import { isTaskWorktreePath } from "@/lib/workspace-paths";
+import {
+	isTaskWorktreePath,
+	matchesScopedProject,
+	readScopedProjectFromWindow,
+	type ScopedProject,
+} from "@/lib/workspace-paths";
 
 type Thread = SessionThread;
 type AppView = "chat" | "sessions" | "settings";
@@ -329,6 +336,7 @@ export function AgentSidebar({
 	canNavigateForward = false,
 	newTaskActive = false,
 	onHome,
+	onNewProjectSession,
 	onNavigateBack,
 	onNavigateForward,
 	onOpenSearch,
@@ -344,6 +352,8 @@ export function AgentSidebar({
 	/** Highlights the New row while the fresh, not-yet-started task page is showing. */
 	newTaskActive?: boolean;
 	onHome: () => void;
+	/** Starts a new session bound to a specific project's workspacePath. */
+	onNewProjectSession?: (workspacePath: string) => void;
 	onNavigateBack?: () => void;
 	onNavigateForward?: () => void;
 	/** Opens the global session search command bar. */
@@ -386,11 +396,16 @@ export function AgentSidebar({
 	const [filter, setFilter] = useState<FilterOption>("All");
 	const [sourceFilter, setSourceFilter] = useState(ALL_SESSION_SOURCES);
 	const [sortMode, setSortMode] = useState<SidebarSortMode>("time");
+	const [scopedProject, setScopedProject] = useState<ScopedProject | null>(() =>
+		readScopedProjectFromWindow(),
+	);
 	// Read after mount: the page is pre-rendered with the default, so reading
 	// localStorage during the first render would mismatch the server HTML.
 	useEffect(() => {
+		setScopedProject(readScopedProjectFromWindow());
 		setSortMode(readSidebarSortModeFromWindow());
 	}, []);
+	const effectiveSortMode: SidebarSortMode = scopedProject ? "time" : sortMode;
 	const [showMoreCount, setShowMoreCount] = useState(
 		INITIAL_VISIBLE_THREAD_COUNT,
 	);
@@ -466,14 +481,26 @@ export function AgentSidebar({
 		void loadProcessContext();
 	}, [loadProcessContext]);
 
-	const sourceOptions = useMemo(() => getSessionSources(threads), [threads]);
+	const scopedThreads = useMemo(
+		() =>
+			scopedProject
+				? threads.filter((thread) =>
+						matchesScopedProject(thread.workspacePath, scopedProject),
+					)
+				: threads,
+		[scopedProject, threads],
+	);
+	const sourceOptions = useMemo(
+		() => getSessionSources(scopedThreads),
+		[scopedThreads],
+	);
 	const filteredThreads = useMemo(() => {
-		const filtered = filterSessionsBySource(threads, sourceFilter);
+		const filtered = filterSessionsBySource(scopedThreads, sourceFilter);
 		if (filter === "Running") {
 			return filtered.filter((t) => t.status === "running");
 		}
 		return filtered;
-	}, [filter, sourceFilter, threads]);
+	}, [filter, scopedThreads, sourceFilter]);
 	const closeMobileSidebar = useCallback(() => {
 		if (isMobile) setOpenMobile(false);
 	}, [isMobile, setOpenMobile]);
@@ -591,7 +618,7 @@ export function AgentSidebar({
 	// isLoadingMore dependency retriggers the check after each fetch settles.
 	useEffect(() => {
 		if (
-			sortMode !== "time" ||
+			effectiveSortMode !== "time" ||
 			filter !== "All" ||
 			isLoadingMore ||
 			!mayHaveMoreSessions ||
@@ -607,12 +634,12 @@ export function AgentSidebar({
 			}
 		});
 	}, [
+		effectiveSortMode,
 		filter,
 		isLoadingMore,
 		loadOlderSessions,
 		mayHaveMoreSessions,
 		showMoreCount,
-		sortMode,
 		taskThreads.length,
 	]);
 	// Pinned threads lead the concatenation, and groupThreadsByProject keeps
@@ -684,6 +711,36 @@ export function AgentSidebar({
 				INITIAL_VISIBLE_THREAD_COUNT,
 		}));
 	}, []);
+	const openProjectInNewWindow = useCallback(
+		async (workspacePath: string, projectLabel: string) => {
+			const trimmed = workspacePath.trim();
+			if (!trimmed || isChatWorkspacePath(trimmed) || !isTauriAvailable()) {
+				return;
+			}
+			try {
+				await desktopClient.invoke("open_project_window", {
+					workspacePath: trimmed,
+					projectLabel,
+				});
+			} catch (error) {
+				console.error("Failed opening project window:", error);
+			}
+		},
+		[],
+	);
+	const createProjectSession = useCallback(
+		(projectId: string, workspacePath: string) => {
+			setCollapsedProjects((current) => {
+				if (!current.has(projectId)) return current;
+				const next = new Set(current);
+				next.delete(projectId);
+				return next;
+			});
+			onNewProjectSession?.(workspacePath);
+			closeMobileSidebar();
+		},
+		[closeMobileSidebar, onNewProjectSession],
+	);
 
 	const filterMenu = (
 		<DropdownMenu>
@@ -1104,16 +1161,44 @@ export function AgentSidebar({
 							<div className="flex h-8 items-center justify-between gap-2">
 								<button
 									className={cn(
-										"min-w-0 truncate text-sm font-medium text-muted-foreground",
+										"inline-flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-muted-foreground",
 										view === "sessions" && "text-sidebar-foreground",
 									)}
 									onClick={openSessions}
+									title={
+										scopedProject ? scopedProject.workspacePath : undefined
+									}
 									type="button"
 								>
-									{sortMode === "time" ? "Sessions" : "Projects"}
+									{scopedProject ? (
+										<>
+											<FolderTree className="size-3.5 shrink-0 text-muted-foreground" />
+											<span className="truncate">{scopedProject.label}</span>
+										</>
+									) : effectiveSortMode === "time" ? (
+										"Sessions"
+									) : (
+										"Projects"
+									)}
 								</button>
 								<div className="flex shrink-0 items-center gap-0.5">
-									{sortToggle}
+									{scopedProject && onNewProjectSession ? (
+										<Button
+											aria-label={`New session in ${scopedProject.label}`}
+											className="m-0! inline-flex size-8 items-center justify-center rounded-md p-0! text-muted-foreground hover:bg-surface-hover hover:text-sidebar-foreground"
+											onClick={() => {
+												onNewProjectSession(scopedProject.workspacePath);
+												closeMobileSidebar();
+											}}
+											size="icon"
+											title={`Tạo session mới trong ${scopedProject.label}`}
+											type="button"
+											variant="ghost"
+										>
+											<Plus className="size-3.5" />
+										</Button>
+									) : null}
+									{!scopedProject ? sortToggle : null}
 									{filterMenu}
 								</div>
 							</div>
@@ -1142,13 +1227,13 @@ export function AgentSidebar({
 									    session answer from the backend: before the first
 									    response (or while a failed fetch is being retried)
 									    "No sessions found" would read as lost history. */}
-									{!hasLoadedHistory && threads.length === 0 ? (
+									{!hasLoadedHistory && scopedThreads.length === 0 ? (
 										<div className="p-4 text-sm text-muted-foreground">
 											Loading session history...
 										</div>
 									) : (
 										<>
-											{sortMode === "time" ? (
+											{effectiveSortMode === "time" ? (
 												showCategorySections ? (
 													<>
 														{pinnedThreads.length > 0 ? (
@@ -1220,11 +1305,34 @@ export function AgentSidebar({
 													const projectRows = groupScheduledThreads(
 														project.threads,
 													);
+													const canOpenInNewWindow =
+														!scopedProject &&
+														Boolean(project.workspacePath.trim()) &&
+														!isChatWorkspacePath(project.workspacePath) &&
+														isTauriAvailable();
 													return (
 														<ProjectSection
 															collapsed={collapsedProjects.has(project.id)}
 															key={project.id}
 															label={project.label}
+															onNewSession={
+																onNewProjectSession
+																	? () =>
+																			createProjectSession(
+																				project.id,
+																				project.workspacePath,
+																			)
+																	: undefined
+															}
+															onOpenInNewWindow={
+																canOpenInNewWindow
+																	? () =>
+																			void openProjectInNewWindow(
+																				project.workspacePath,
+																				project.label,
+																			)
+																	: undefined
+															}
 															onToggle={() => toggleProject(project.id)}
 														>
 															{projectRows.slice(0, visibleCount).map(listRow)}
@@ -1246,7 +1354,7 @@ export function AgentSidebar({
 												})
 											)}
 
-											{(sortMode === "time"
+											{(effectiveSortMode === "time"
 												? filteredThreads.length === 0
 												: projectGroups.length === 0) && (
 												<div className="px-2 py-4 text-sm text-muted-foreground">
@@ -1255,11 +1363,11 @@ export function AgentSidebar({
 											)}
 										</>
 									)}
-									{sortMode === "time" &&
+									{effectiveSortMode === "time" &&
 										!showCategorySections &&
 										showTimeShowMore &&
 										timeShowMoreButton}
-									{sortMode === "project" &&
+									{effectiveSortMode === "project" &&
 										filter === "All" &&
 										mayHaveMoreSessions && (
 											<Button
@@ -1455,18 +1563,23 @@ function ProjectSection({
 	label,
 	collapsed,
 	onToggle,
+	onNewSession,
+	onOpenInNewWindow,
 	children,
 }: {
 	label: string;
 	collapsed: boolean;
 	onToggle: () => void;
+	onNewSession?: () => void;
+	onOpenInNewWindow?: () => void;
 	children: ReactNode;
 }) {
-	return (
-		<div className="mb-1 min-w-0">
+	const hasContextMenu = Boolean(onNewSession || onOpenInNewWindow);
+	const header = (
+		<div className="group/project flex h-8 w-full min-w-0 items-center gap-0.5 rounded-md px-1 text-sm font-medium text-sidebar-foreground hover:bg-surface-hover-lighter">
 			<button
 				aria-expanded={!collapsed}
-				className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-sm font-medium text-sidebar-foreground hover:bg-surface-hover-lighter focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+				className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
 				onClick={onToggle}
 				title={label}
 				type="button"
@@ -1479,6 +1592,59 @@ function ProjectSection({
 				/>
 				<span className="block min-w-0 truncate">{label}</span>
 			</button>
+			{onNewSession ? (
+				<button
+					aria-label={`New session in ${label}`}
+					className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface-hover hover:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/project:opacity-100"
+					onClick={(event) => {
+						event.stopPropagation();
+						onNewSession();
+					}}
+					title={`Tạo session mới trong ${label}`}
+					type="button"
+				>
+					<Plus className="size-3.5" />
+				</button>
+			) : null}
+			{onOpenInNewWindow ? (
+				<button
+					aria-label={`Open ${label} in new window`}
+					className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface-hover hover:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/project:opacity-100"
+					onClick={(event) => {
+						event.stopPropagation();
+						onOpenInNewWindow();
+					}}
+					title={`Mở ${label} trong cửa sổ riêng`}
+					type="button"
+				>
+					<ExternalLink className="size-3.5" />
+				</button>
+			) : null}
+		</div>
+	);
+	return (
+		<div className="mb-1 min-w-0">
+			{hasContextMenu ? (
+				<ContextMenu>
+					<ContextMenuTrigger asChild>{header}</ContextMenuTrigger>
+					<ContextMenuContent className="w-56">
+						{onNewSession ? (
+							<ContextMenuItem onSelect={onNewSession}>
+								<Plus className="size-4" />
+								Tạo session mới trong dự án
+							</ContextMenuItem>
+						) : null}
+						{onOpenInNewWindow ? (
+							<ContextMenuItem onSelect={onOpenInNewWindow}>
+								<ExternalLink className="size-4" />
+								Mở dự án trong cửa sổ riêng
+							</ContextMenuItem>
+						) : null}
+					</ContextMenuContent>
+				</ContextMenu>
+			) : (
+				header
+			)}
 			{!collapsed ? <div className="pl-3">{children}</div> : null}
 		</div>
 	);

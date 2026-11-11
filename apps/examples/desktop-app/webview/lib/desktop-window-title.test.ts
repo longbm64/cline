@@ -24,6 +24,8 @@ beforeEach(() => {
 	setTitle.mockClear();
 	// biome-ignore lint/suspicious/noExplicitAny: test-only global shim for the Tauri bridge marker
 	delete (window as any).__TAURI_INTERNALS__;
+	delete (window as Window & { __CLINE_SCOPED_PROJECT__?: unknown })
+		.__CLINE_SCOPED_PROJECT__;
 });
 
 afterEach(() => {
@@ -50,6 +52,22 @@ describe("desktop window title", () => {
 		const { buildDesktopWindowTitle } = await importFresh();
 		expect(buildDesktopWindowTitle("0.0.14-beta.1")).toBe(
 			"Cline Beta v0.0.14-beta.1",
+		);
+	});
+
+	it("prefixes the title with the scoped project label in a project window", async () => {
+		(
+			window as Window & {
+				__CLINE_SCOPED_PROJECT__?: { workspacePath: string; label: string };
+			}
+		).__CLINE_SCOPED_PROJECT__ = {
+			workspacePath: "/projects/kaui",
+			label: "kaui",
+		};
+		const { buildDesktopWindowTitle, DEFAULT_DESKTOP_WINDOW_TITLE } =
+			await importFresh();
+		expect(buildDesktopWindowTitle("1.2.3")).toBe(
+			`kaui — ${DEFAULT_DESKTOP_WINDOW_TITLE} v1.2.3`,
 		);
 	});
 

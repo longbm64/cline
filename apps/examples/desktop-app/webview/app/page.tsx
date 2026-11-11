@@ -1,7 +1,10 @@
 "use client";
 
 import type { HandoffGitPreview } from "@cline/core/cloud";
-import type { ProviderAuthInfo } from "@cline/shared/browser";
+import {
+	isChatWorkspacePath,
+	type ProviderAuthInfo,
+} from "@cline/shared/browser";
 import { AttachmentDropZone } from "@cline/ui";
 import { Loader2, LoaderCircle, SquareTerminal } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -197,6 +200,7 @@ import {
 	LOCAL_WORKSPACE_ENVIRONMENT_ID,
 	mergeWorkspacePaths,
 	normalizeWorkspacePath,
+	readScopedProjectFromWindow,
 	readWorkspaceSelectionFromWindow,
 	workspacePathsFromSessions,
 	writeWorkspaceSelectionToWindow,
@@ -476,7 +480,11 @@ function App() {
 	});
 	useEffect(() => {
 		if (isTauriAvailable()) {
-			void reapOrphanedTerminals().then(() => setTerminalAvailable(true));
+			if (readScopedProjectFromWindow()) {
+				setTerminalAvailable(true);
+			} else {
+				void reapOrphanedTerminals().then(() => setTerminalAvailable(true));
+			}
 		}
 		const stored = readTerminalPanelState();
 		setTerminalPanel({
@@ -664,20 +672,48 @@ function App() {
 		[],
 	);
 
-	useEffect(() => watchDesktopTrayStatus(), []);
-	useEffect(() => watchDesktopNotifications(), []);
-
-	const createThreadForEnvironment = useCallback((environmentId: string) => {
-		dispatchApp({
-			type: "new-thread",
-			threadId: makeThreadId(),
-			environmentId,
-		});
-		requestPromptInputFocus();
+	useEffect(() => {
+		if (readScopedProjectFromWindow()) return;
+		return watchDesktopTrayStatus();
 	}, []);
+	useEffect(() => {
+		if (readScopedProjectFromWindow()) return;
+		return watchDesktopNotifications();
+	}, []);
+
+	const createThreadForEnvironment = useCallback(
+		(environmentId: string, initialWorkspacePath?: string) => {
+			dispatchApp({
+				type: "new-thread",
+				threadId: makeThreadId(),
+				environmentId,
+				...(initialWorkspacePath !== undefined ? { initialWorkspacePath } : {}),
+			});
+			requestPromptInputFocus();
+		},
+		[],
+	);
 	const handleNewThread = useCallback(() => {
 		createThreadForEnvironment(activeEnvironmentId);
 	}, [activeEnvironmentId, createThreadForEnvironment]);
+	const handleNewProjectSession = useCallback(
+		(workspacePath: string) => {
+			const normalized = isChatWorkspacePath(workspacePath)
+				? ""
+				: workspacePath.trim();
+			const stored = readWorkspaceSelectionFromWindow(
+				LOCAL_WORKSPACE_ENVIRONMENT_ID,
+			);
+			writeWorkspaceSelectionToWindow(LOCAL_WORKSPACE_ENVIRONMENT_ID, {
+				lastWorkspace: normalized,
+				workspaces: normalized
+					? mergeWorkspacePaths(stored.workspaces, [normalized])
+					: stored.workspaces,
+			});
+			createThreadForEnvironment(LOCAL_WORKSPACE_ENVIRONMENT_ID, normalized);
+		},
+		[createThreadForEnvironment],
+	);
 	const selectEnvironmentDraft = useCallback((environmentId: string) => {
 		dispatchApp({
 			type: "select-environment-draft",
@@ -949,14 +985,13 @@ function App() {
 	const activeLocationRef = useRef(appState.navigation.current);
 	activeLocationRef.current = appState.navigation.current;
 	const handleHome = useCallback(() => {
-		if (activeThread?.historySession || activeThread?.hasStarted) {
-			selectEnvironmentDraft(activeEnvironmentId);
-			requestPromptInputFocus();
-			return;
-		}
-		navigateWith({ view: "chat" });
-		requestPromptInputFocus();
-	}, [activeThread, activeEnvironmentId, selectEnvironmentDraft, navigateWith]);
+		const stored = readWorkspaceSelectionFromWindow(activeEnvironmentId);
+		writeWorkspaceSelectionToWindow(activeEnvironmentId, {
+			...stored,
+			lastWorkspace: "",
+		});
+		createThreadForEnvironment(activeEnvironmentId, "");
+	}, [activeEnvironmentId, createThreadForEnvironment]);
 	const handleViewChange = useCallback(
 		(nextView: DesktopAppView) => {
 			navigateWith({ view: nextView });
@@ -1180,42 +1215,41 @@ function App() {
 			}),
 		[handoffLifecycle],
 	);
-	useEffect(
-		() =>
-			subscribeToDesktopActions((action) => {
-				switch (action.type) {
-					case "new-session":
-						handleNewThread();
-						break;
-					case "open-settings":
-						handleViewChange("settings");
-						break;
-					case "open-keybindings":
-						handleSettingsSectionChange("Keybindings");
-						break;
-					case "open-session":
-						void handleOpenSessionById(action.sessionId);
-						break;
-					case "export-diagnostics":
-						setExportDiagnosticsOpen(true);
-						break;
-					case "check-for-updates":
-						void checkForUpdateAndNotify();
-						break;
-					case "zoom-in":
-					case "zoom-out":
-					case "zoom-reset":
-						applyAppZoomAction(action.type);
-						break;
-				}
-			}),
-		[
-			handleNewThread,
-			handleOpenSessionById,
-			handleSettingsSectionChange,
-			handleViewChange,
-		],
-	);
+	useEffect(() => {
+		if (readScopedProjectFromWindow()) return;
+		return subscribeToDesktopActions((action) => {
+			switch (action.type) {
+				case "new-session":
+					handleNewThread();
+					break;
+				case "open-settings":
+					handleViewChange("settings");
+					break;
+				case "open-keybindings":
+					handleSettingsSectionChange("Keybindings");
+					break;
+				case "open-session":
+					void handleOpenSessionById(action.sessionId);
+					break;
+				case "export-diagnostics":
+					setExportDiagnosticsOpen(true);
+					break;
+				case "check-for-updates":
+					void checkForUpdateAndNotify();
+					break;
+				case "zoom-in":
+				case "zoom-out":
+				case "zoom-reset":
+					applyAppZoomAction(action.type);
+					break;
+			}
+		});
+	}, [
+		handleNewThread,
+		handleOpenSessionById,
+		handleSettingsSectionChange,
+		handleViewChange,
+	]);
 
 	const historyWorkspacePaths = useMemo(
 		() =>
@@ -1274,6 +1308,7 @@ function App() {
 								activeSessionId={activeHistorySessionId}
 								newTaskActive={newTaskActive}
 								onHome={handleHome}
+								onNewProjectSession={handleNewProjectSession}
 								onNavigateBack={handleNavigateBack}
 								onNavigateForward={handleNavigateForward}
 								onOpenSearch={handleOpenCommandBar}
@@ -1332,6 +1367,7 @@ function App() {
 											}
 											initialAttachments={activeThread.initialAttachments}
 											initialPromptDraft={activeThread.initialPromptDraft}
+											initialWorkspacePath={activeThread.initialWorkspacePath}
 											handoffLifecycle={handoffLifecycle}
 											confirmHandoffGit={confirmHandoffGit}
 											promptDrafts={promptDrafts}
@@ -1486,6 +1522,7 @@ function ChatThreadPane({
 	liveHistorySession,
 	initialAttachments,
 	initialPromptDraft,
+	initialWorkspacePath,
 	handoffLifecycle,
 	knownWorkspacePaths,
 	onInitialPromptDraftConsumed,
@@ -1517,6 +1554,7 @@ function ChatThreadPane({
 	liveHistorySession?: SessionHistoryItem;
 	initialAttachments?: File[];
 	initialPromptDraft?: string;
+	initialWorkspacePath?: string;
 	handoffLifecycle: Omit<HandoffLifecycle, "onEvent">;
 	confirmHandoffGit: (plan: HandoffGitPreview) => Promise<boolean>;
 	knownWorkspacePaths: string[];
@@ -1594,7 +1632,7 @@ function ChatThreadPane({
 		reset,
 		abort,
 		hydrateSession,
-	} = useChatSession(environmentId);
+	} = useChatSession(environmentId, initialWorkspacePath);
 	// Bind the runtime session to the thread so deleting it elsewhere (e.g.
 	// the sidebar) can close this pane even when it was not opened from history.
 	useEffect(() => {

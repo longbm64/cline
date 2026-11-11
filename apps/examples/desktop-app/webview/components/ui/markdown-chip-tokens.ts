@@ -53,15 +53,41 @@ function splitText(
 	return nodes;
 }
 
+function splitLineBreaks(nodes: MarkdownNode[]): MarkdownNode[] {
+	return nodes.flatMap((node) => {
+		if (node.type !== "text" || !node.value?.includes("\n")) {
+			return [node];
+		}
+		const lines = node.value.split(/\r?\n/);
+		const result: MarkdownNode[] = [];
+		for (let i = 0; i < lines.length; i += 1) {
+			if (i > 0) {
+				result.push({ type: "break" });
+			}
+			if (lines[i].length > 0) {
+				result.push({ type: "text", value: lines[i] });
+			}
+		}
+		return result;
+	});
+}
+
 /**
  * Wraps the given exact tokens (a leading `/command`, `@path` mentions) in
- * {@link CHIP_TOKEN_TAG} elements, leaving code and links untouched.
+ * {@link CHIP_TOKEN_TAG} elements, leaving code and links untouched. When
+ * `preserveLineBreaks` is enabled, single newlines in prose text nodes are
+ * also converted to `<br>` nodes so user-authored line breaks stay intact.
  *
- * Use as `[remarkChipTokens, { tokens }]`: Streamdown caches processors by
- * plugin name and options, so the tokens must travel as options.
+ * Use as `[remarkChipTokens, { tokens, preserveLineBreaks }]`: Streamdown
+ * caches processors by plugin name and options, so the tokens must travel as
+ * options.
  */
-export function remarkChipTokens(options: { tokens: string[] }) {
+export function remarkChipTokens(options: {
+	tokens: string[];
+	preserveLineBreaks?: boolean;
+}) {
 	const tokens = new Set(options.tokens);
+	const preserveLineBreaks = Boolean(options.preserveLineBreaks);
 	return (tree: MarkdownNode) => {
 		let atDocumentStart = true;
 		const walk = (node: MarkdownNode) => {
@@ -70,7 +96,7 @@ export function remarkChipTokens(options: { tokens: string[] }) {
 				if (child.type === "text") {
 					const parts = splitText(child.value ?? "", tokens, atDocumentStart);
 					atDocumentStart = false;
-					return parts;
+					return preserveLineBreaks ? splitLineBreaks(parts) : parts;
 				}
 				if (SKIPPED_NODE_TYPES.has(child.type) || !child.children) {
 					atDocumentStart = false;

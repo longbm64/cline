@@ -1,14 +1,17 @@
 import type { ProcessContext } from "@/hooks/chat-session/types";
 import { productNameForVersion, STABLE_PRODUCT_NAME } from "@/lib/app-channel";
 import { desktopClient, isTauriAvailable } from "@/lib/desktop-client";
+import { readScopedProjectFromWindow } from "@/lib/workspace-paths";
 
 export const DEFAULT_DESKTOP_WINDOW_TITLE = STABLE_PRODUCT_NAME;
 
 export function buildDesktopWindowTitle(version: string | undefined): string {
 	const trimmed = version?.trim();
-	return trimmed
+	const baseTitle = trimmed
 		? `${productNameForVersion(trimmed)} v${trimmed}`
 		: DEFAULT_DESKTOP_WINDOW_TITLE;
+	const scoped = readScopedProjectFromWindow();
+	return scoped ? `${scoped.label} — ${baseTitle}` : baseTitle;
 }
 
 /**

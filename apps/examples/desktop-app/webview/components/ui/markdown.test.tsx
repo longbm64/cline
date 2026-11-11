@@ -94,6 +94,21 @@ const ready = true;
 		]);
 	});
 
+	test("preserves single line breaks in prose when preserveLineBreaks is enabled", () => {
+		const html = renderToStaticMarkup(
+			<MemoizedMarkdown
+				chipTokens={new Set(["/compact", "@src/app.ts"])}
+				content={
+					"/compact dòng đầu tiên\ndòng thứ hai cùng @src/app.ts\ndòng thứ ba"
+				}
+				preserveLineBreaks
+			/>,
+		);
+
+		expect(chipTexts(html)).toEqual(["/compact", "@src/app.ts"]);
+		expect(html.match(/<br\s*\/?>/g)).toHaveLength(2);
+	});
+
 	test("names the diagram from the fence title", () => {
 		const html = renderToStaticMarkup(
 			<MemoizedMarkdown

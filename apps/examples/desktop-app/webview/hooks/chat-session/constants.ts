@@ -10,6 +10,7 @@ import {
 import { normalizeProviderId } from "@/lib/provider-id";
 import {
 	LOCAL_WORKSPACE_ENVIRONMENT_ID,
+	readScopedProjectFromWindow,
 	readWorkspaceSelectionFromWindow,
 } from "@/lib/workspace-paths";
 
@@ -82,7 +83,10 @@ export const DEFAULT_CHAT_CONFIG: ChatSessionConfig = {
 
 export function getInitialChatConfig(
 	environmentId: string,
-	options?: { executionTarget?: ExecutionTarget },
+	options?: {
+		executionTarget?: ExecutionTarget;
+		initialWorkspacePath?: string;
+	},
 ): ChatSessionConfig {
 	const selection = readModelSelectionStorageFromWindow();
 	const workspaceSelection = readWorkspaceSelectionFromWindow(environmentId);
@@ -101,20 +105,33 @@ export function getInitialChatConfig(
 			: undefined) ||
 		(liveDefaultModelId ?? DEFAULT_CHAT_CONFIG.model);
 
+	const explicitWorkspace =
+		options?.initialWorkspacePath !== undefined
+			? options.initialWorkspacePath.trim()
+			: undefined;
+	const workspace = explicitWorkspace ?? workspaceSelection.lastWorkspace;
 	const local: ChatSessionConfig = {
 		...DEFAULT_CHAT_CONFIG,
 		environmentId,
 		provider,
 		model,
-		workspaceRoot: workspaceSelection.lastWorkspace,
-		cwd: workspaceSelection.lastWorkspace,
+		workspaceRoot: workspace,
+		cwd: workspace,
 	};
-	// Cloud preferences apply only to the local environment.
+	// Cloud preferences apply only to the local environment, and a window
+	// scoped to a local project directory or an explicit local workspace/chat
+	// selection always starts in local mode.
+	const scopedProject =
+		environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
+			? readScopedProjectFromWindow()
+			: null;
 	const executionTarget =
 		options?.executionTarget ??
-		(environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
-			? readExecutionTargetFromWindow()
-			: "local");
+		(explicitWorkspace !== undefined || scopedProject
+			? "local"
+			: environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
+				? readExecutionTargetFromWindow()
+				: "local");
 	if (executionTarget !== "cloud") {
 		return local;
 	}

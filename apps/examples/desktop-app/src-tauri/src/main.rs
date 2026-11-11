@@ -1157,6 +1157,87 @@ fn show_main_window(app: &tauri::AppHandle) {
     let _ = window.set_focus();
 }
 
+fn normalize_project_window_path(workspace_path: &str) -> String {
+    let trimmed = workspace_path.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        workspace_path.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn project_window_label(workspace_path: &str) -> String {
+    let normalized = normalize_project_window_path(workspace_path);
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("project-{hash:016x}")
+}
+
+#[tauri::command]
+async fn open_project_window(
+    app: tauri::AppHandle,
+    workspace_path: String,
+    project_label: Option<String>,
+) -> Result<String, String> {
+    let normalized_path = normalize_project_window_path(&workspace_path);
+    if normalized_path.is_empty() {
+        return Err("workspacePath is required".to_string());
+    }
+    let window_label = project_window_label(&normalized_path);
+    if let Some(existing) = app.get_webview_window(&window_label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(window_label);
+    }
+
+    let display_label = project_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            Path::new(&normalized_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| normalized_path.clone())
+        });
+
+    let payload = serde_json::json!({
+        "workspacePath": normalized_path,
+        "label": display_label,
+    });
+    let init_script = format!("window.__CLINE_SCOPED_PROJECT__ = {payload};");
+    let title = format!("{display_label} — {}", app.package_info().name);
+
+    let builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        tauri::WebviewUrl::default(),
+    )
+    .title(&title)
+    .inner_size(1500.0, 980.0)
+    .resizable(true)
+    .disable_drag_drop_handler()
+    .initialization_script(&init_script);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+
+    let window = builder
+        .build()
+        .map_err(|error| format!("failed opening project window: {error}"))?;
+    clamp_main_window_to_work_area(&window);
+    let _ = window.set_focus();
+    Ok(window_label)
+}
+
 /// The inner size a too-large window should shrink to, or `None` when it
 /// already fits. All values are logical pixels; `chrome` is the size the OS
 /// decorations add around the webview (outer minus inner).
@@ -1705,6 +1786,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_backend_endpoint,
             pick_workspace_directory,
+            open_project_window,
             open_mcp_settings_file,
             get_update_status,
             restart_to_apply_update,

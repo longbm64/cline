@@ -585,7 +585,8 @@ describe("ChatMessages tool disclosures", () => {
 					result: [
 						{
 							query: "src/hello.ts",
-							result: "1\tconst greeting = 'hello';\n2\texport default greeting;\n",
+							result:
+								"1\tconst greeting = 'hello';\n2\texport default greeting;\n",
 						},
 					],
 				}),
@@ -1185,6 +1186,24 @@ describe("ChatMessages tool disclosures", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("preserves single line breaks in user message bubbles", async () => {
+		await renderMessages([
+			{
+				id: "multiline-user",
+				sessionId: "session-1",
+				role: "user",
+				content:
+					"giờ mình sẽ thảo luận về lệnh #release\nkhi lệnh #release được gọi thì cần làm các bước sau:\ný kiến của bạn thế nào ?",
+				createdAt: 1,
+			},
+		]);
+
+		const userBubble = container.querySelector(
+			'.cline-chat-message[data-role="user"]',
+		);
+		expect(userBubble?.querySelectorAll("br")).toHaveLength(2);
 	});
 
 	it("hides runtime steering notes from the transcript", async () => {

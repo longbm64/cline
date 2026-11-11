@@ -24,7 +24,10 @@ const desktopMocks = vi.hoisted(() => ({
 	subscribeTransportState: vi.fn(() => () => undefined),
 }));
 const { invoke } = desktopMocks;
-vi.mock("@/lib/desktop-client", () => ({ desktopClient: desktopMocks }));
+vi.mock("@/lib/desktop-client", () => ({
+	desktopClient: desktopMocks,
+	isTauriAvailable: () => false,
+}));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -1538,5 +1541,43 @@ describe("AgentSidebar session organization", () => {
 		expect(
 			container.querySelector('[aria-label="Settings"]')?.textContent,
 		).toContain("Settings");
+	});
+
+	it("starts a new session for a specific project when clicking the project + button", async () => {
+		const onNewProjectSession = vi.fn();
+		const threads = [makeThread("kaui", 1), makeThread("kahub", 2)];
+
+		await act(async () => {
+			root.render(
+				<AccountProvider>
+					<SidebarProvider>
+						<AgentSidebar
+							activeSessionId={null}
+							onHome={vi.fn()}
+							onNewProjectSession={onNewProjectSession}
+							onSettingsSectionChange={vi.fn()}
+							sessionHistory={makeSessionHistory(threads, vi.fn())}
+							setView={vi.fn()}
+							settingsSection="General"
+							view="chat"
+						/>
+					</SidebarProvider>
+				</AccountProvider>,
+			);
+		});
+
+		const sortToggle = container.querySelector(
+			'[aria-label="Sort sessions: Time"]',
+		);
+		expect(sortToggle).not.toBeNull();
+		await click(sortToggle!);
+
+		const newSessionButton = container.querySelector(
+			'[aria-label="New session in kaui"]',
+		);
+		expect(newSessionButton).not.toBeNull();
+		await click(newSessionButton!);
+
+		expect(onNewProjectSession).toHaveBeenCalledWith("/projects/kaui");
 	});
 });

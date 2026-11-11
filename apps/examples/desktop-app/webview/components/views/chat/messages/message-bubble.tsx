@@ -96,7 +96,14 @@ function UserMessageMarkdown({
 		() => new Set(tokenKey ? tokenKey.split("\n") : []),
 		[tokenKey],
 	);
-	return <MemoizedMarkdown chipTokens={chipTokens} content={content} />;
+	return (
+		<MemoizedMarkdown
+			chipTokens={chipTokens}
+			classNames="[&_li]:whitespace-pre-wrap [&_p]:whitespace-pre-wrap"
+			content={content}
+			preserveLineBreaks
+		/>
+	);
 }
 
 function MessageMedia({

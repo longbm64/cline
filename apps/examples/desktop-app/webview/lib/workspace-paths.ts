@@ -257,18 +257,85 @@ export function parseWorkspaceSelectionStorage(
 	}
 }
 
+export type ScopedProject = {
+	workspacePath: string;
+	label: string;
+};
+
+export function readScopedProjectFromWindow(): ScopedProject | null {
+	if (typeof window === "undefined") {
+		return null;
+	}
+	const raw = (window as Window & { __CLINE_SCOPED_PROJECT__?: unknown })
+		.__CLINE_SCOPED_PROJECT__;
+	if (!raw || typeof raw !== "object") {
+		return null;
+	}
+	const candidate = raw as { workspacePath?: unknown; label?: unknown };
+	const workspacePath =
+		typeof candidate.workspacePath === "string"
+			? candidate.workspacePath.trim()
+			: "";
+	if (!workspacePath || isChatWorkspacePath(workspacePath)) {
+		return null;
+	}
+	const fallbackLabel =
+		workspacePath
+			.replace(/[\\/]+$/, "")
+			.split(/[\\/]/)
+			.filter(Boolean)
+			.at(-1) || workspacePath;
+	const label =
+		typeof candidate.label === "string" && candidate.label.trim()
+			? candidate.label.trim()
+			: fallbackLabel;
+	return { workspacePath, label };
+}
+
+export function matchesScopedProject(
+	workspacePath: string,
+	scopedProject: ScopedProject | null = readScopedProjectFromWindow(),
+): boolean {
+	if (!scopedProject) {
+		return true;
+	}
+	return (
+		normalizeWorkspacePath(workspacePath) ===
+		normalizeWorkspacePath(scopedProject.workspacePath)
+	);
+}
+
 export function readWorkspaceSelectionFromWindow(
 	environmentId: string,
 ): WorkspaceSelectionStorage {
 	if (typeof window === "undefined") {
 		return { lastWorkspace: "", workspaces: [] };
 	}
+	const scoped =
+		environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
+			? readScopedProjectFromWindow()
+			: null;
 	try {
-		return parseWorkspaceSelectionStorage(
+		const stored = parseWorkspaceSelectionStorage(
 			window.localStorage.getItem(WORKSPACE_SELECTION_STORAGE_KEY),
 			environmentId,
 		);
+		if (scoped) {
+			return {
+				lastWorkspace: scoped.workspacePath,
+				workspaces: filterWorkspacePaths(
+					mergeWorkspacePaths([scoped.workspacePath], stored.workspaces),
+				),
+			};
+		}
+		return stored;
 	} catch {
+		if (scoped) {
+			return {
+				lastWorkspace: scoped.workspacePath,
+				workspaces: filterWorkspacePaths([scoped.workspacePath]),
+			};
+		}
 		return { lastWorkspace: "", workspaces: [] };
 	}
 }
@@ -281,10 +348,13 @@ export function writeWorkspaceSelectionToWindow(
 		return;
 	}
 	try {
+		const rawStore = window.localStorage.getItem(
+			WORKSPACE_SELECTION_STORAGE_KEY,
+		);
 		const current = (() => {
 			try {
 				const parsed = JSON.parse(
-					window.localStorage.getItem(WORKSPACE_SELECTION_STORAGE_KEY) ?? "{}",
+					rawStore ?? "{}",
 				) as Partial<WorkspaceSelectionStore>;
 				return parsed.environments && typeof parsed.environments === "object"
 					? parsed.environments
@@ -293,9 +363,22 @@ export function writeWorkspaceSelectionToWindow(
 				return {};
 			}
 		})();
-		const lastWorkspace = isChatWorkspacePath(value.lastWorkspace)
+		const scoped =
+			environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
+				? readScopedProjectFromWindow()
+				: null;
+		const previousStored = parseWorkspaceSelectionStorage(
+			rawStore,
+			environmentId,
+		);
+		const candidateLastWorkspace = isChatWorkspacePath(value.lastWorkspace)
 			? ""
 			: value.lastWorkspace.trim();
+		// A scoped project window should register its workspace in the catalog
+		// without overwriting the main window's remembered lastWorkspace.
+		const lastWorkspace = scoped
+			? previousStored.lastWorkspace || scoped.workspacePath
+			: candidateLastWorkspace;
 		window.localStorage.setItem(
 			WORKSPACE_SELECTION_STORAGE_KEY,
 			JSON.stringify({
@@ -304,7 +387,12 @@ export function writeWorkspaceSelectionToWindow(
 					[environmentId]: {
 						lastWorkspace,
 						workspaces: filterWorkspacePaths(
-							mergeWorkspacePaths(value.workspaces, [lastWorkspace]),
+							mergeWorkspacePaths(
+								value.workspaces,
+								scoped
+									? [scoped.workspacePath, lastWorkspace]
+									: [lastWorkspace],
+							),
 						),
 					},
 				},

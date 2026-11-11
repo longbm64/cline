@@ -418,4 +418,31 @@ describe("desktopAppReducer", () => {
 			environmentId: "local",
 		});
 	});
+
+	it("preserves explicit initialWorkspacePath on new threads for Just chat and project sessions", () => {
+		let state = createDesktopAppState("welcome", settingsSection, "local");
+		state = desktopAppReducer(state, {
+			type: "new-thread",
+			threadId: "just-chat-thread",
+			environmentId: "local",
+			initialWorkspacePath: "",
+		});
+		expect(state.threads.at(-1)).toEqual({
+			id: "just-chat-thread",
+			environmentId: "local",
+			initialWorkspacePath: "",
+		});
+
+		state = desktopAppReducer(state, {
+			type: "new-thread",
+			threadId: "project-thread",
+			environmentId: "local",
+			initialWorkspacePath: "/Users/dev/kaui",
+		});
+		expect(state.threads.at(-1)).toEqual({
+			id: "project-thread",
+			environmentId: "local",
+			initialWorkspacePath: "/Users/dev/kaui",
+		});
+	});
 });

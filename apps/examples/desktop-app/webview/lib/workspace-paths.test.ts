@@ -7,9 +7,11 @@ import {
 	isExcludedWorkspacePath,
 	isTaskWorktreePath,
 	looksLikeFolderPath,
+	matchesScopedProject,
 	mergeWorkspacePaths,
 	normalizeWorkspacePath,
 	parseWorkspaceSelectionStorage,
+	readScopedProjectFromWindow,
 	readWorkspaceSelectionFromWindow,
 	registerHostHomeDirectory,
 	registerTaskWorktreeRoot,
@@ -34,6 +36,8 @@ describe("workspace paths", () => {
 
 	afterEach(() => {
 		window.localStorage.clear();
+		delete (window as Window & { __CLINE_SCOPED_PROJECT__?: unknown })
+			.__CLINE_SCOPED_PROJECT__;
 	});
 
 	it("normalizes trailing separators and Windows path casing", () => {
@@ -462,5 +466,45 @@ describe("workspace paths", () => {
 				"pi-host",
 			),
 		).toEqual(["/home/pi/remote-app"]);
+	});
+
+	it("locks a scoped project window to its project without overwriting the main window's lastWorkspace", () => {
+		writeWorkspaceSelectionToWindow("local", {
+			lastWorkspace: "/projects/main-app",
+			workspaces: ["/projects/main-app"],
+		});
+
+		(
+			window as Window & {
+				__CLINE_SCOPED_PROJECT__?: { workspacePath: string; label?: string };
+			}
+		).__CLINE_SCOPED_PROJECT__ = {
+			workspacePath: "/projects/kaui/",
+			label: "kaui",
+		};
+
+		expect(readScopedProjectFromWindow()).toEqual({
+			workspacePath: "/projects/kaui/",
+			label: "kaui",
+		});
+		expect(matchesScopedProject("/projects/kaui")).toBe(true);
+		expect(matchesScopedProject("/projects/main-app")).toBe(false);
+
+		expect(readWorkspaceSelectionFromWindow("local")).toEqual({
+			lastWorkspace: "/projects/kaui/",
+			workspaces: ["/projects/kaui/", "/projects/main-app"],
+		});
+
+		writeWorkspaceSelectionToWindow("local", {
+			lastWorkspace: "/projects/kaui",
+			workspaces: ["/projects/kaui", "/projects/main-app"],
+		});
+
+		delete (window as Window & { __CLINE_SCOPED_PROJECT__?: unknown })
+			.__CLINE_SCOPED_PROJECT__;
+		expect(readWorkspaceSelectionFromWindow("local")).toEqual({
+			lastWorkspace: "/projects/main-app",
+			workspaces: ["/projects/kaui", "/projects/main-app"],
+		});
 	});
 });

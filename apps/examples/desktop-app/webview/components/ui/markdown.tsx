@@ -388,12 +388,15 @@ export const MemoizedMarkdown = memo(
 		classNames,
 		streaming = false,
 		chipTokens,
+		preserveLineBreaks = false,
 	}: {
 		content: string;
 		streaming?: boolean;
 		classNames?: string;
 		/** Exact `/command` and `@path` tokens to render as composer chips. */
 		chipTokens?: ReadonlySet<string>;
+		/** Preserve single newlines (`\n`) as `<br>` elements (e.g. in user bubbles). */
+		preserveLineBreaks?: boolean;
 	}) => {
 		const {
 			captureDiagramLink,
@@ -401,15 +404,22 @@ export const MemoizedMarkdown = memo(
 			recordDiagramLinkPress,
 			setPendingUrl,
 		} = useDiagramLinkTarget();
+		const hasChipTokens = Boolean(chipTokens?.size);
 		const remarkPlugins = useMemo(
 			() =>
-				chipTokens?.size
+				hasChipTokens || preserveLineBreaks
 					? [
 							...Object.values(defaultRemarkPlugins),
-							[remarkChipTokens, { tokens: [...chipTokens] }],
+							[
+								remarkChipTokens,
+								{
+									tokens: chipTokens ? [...chipTokens] : [],
+									preserveLineBreaks,
+								},
+							],
 						]
 					: undefined,
-			[chipTokens],
+			[chipTokens, hasChipTokens, preserveLineBreaks],
 		);
 
 		return (
@@ -423,9 +433,9 @@ export const MemoizedMarkdown = memo(
 				onPointerDownCapture={recordDiagramLinkPress}
 			>
 				<Streamdown
-					allowedTags={remarkPlugins ? chipTokenAllowedTags : undefined}
+					allowedTags={hasChipTokens ? chipTokenAllowedTags : undefined}
 					className={cn("cline-markdown", classNames)}
-					components={remarkPlugins ? chipTokenComponents : markdownComponents}
+					components={hasChipTokens ? chipTokenComponents : markdownComponents}
 					controls={agentMarkdownControls}
 					dir="auto"
 					isAnimating={streaming}

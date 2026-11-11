@@ -592,7 +592,10 @@ function dispatchCoreLog(chunk: string): void {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useChatSession(environmentId: string) {
+export function useChatSession(
+	environmentId: string,
+	initialWorkspacePath?: string,
+) {
 	const subscribeToEnvironment = useCallback(
 		(name: string, listener: (payload: unknown) => void) =>
 			desktopClient.subscribe(name, (payload) => {
@@ -605,7 +608,7 @@ export function useChatSession(environmentId: string) {
 	const [isHydratingSession, setIsHydratingSession] = useState(false);
 	const [isCloudSessionExpired, setIsCloudSessionExpired] = useState(false);
 	const [config, setConfig] = useState<ChatSessionConfig>(() =>
-		getInitialChatConfig(environmentId),
+		getInitialChatConfig(environmentId, { initialWorkspacePath }),
 	);
 	// Swap in the live feed's first free model once it arrives, only while the
 	// config is still the untouched new-user default. Never blocks the UI.
@@ -1482,7 +1485,29 @@ export function useChatSession(environmentId: string) {
 			if (ctx.taskWorktreeRoot) {
 				registerTaskWorktreeRoot(ctx.taskWorktreeRoot);
 			}
+			const explicitWorkspace =
+				initialWorkspacePath !== undefined
+					? initialWorkspacePath.trim()
+					: undefined;
+			if (explicitWorkspace === "") {
+				if (requestId !== workspaceSelectionRequestRef.current) {
+					return;
+				}
+				setConfig((prev) => {
+					const currentWorkspace = (prev.workspaceRoot || prev.cwd || "").trim();
+					const selectionChangedWhileLoading = Boolean(currentWorkspace);
+					const workspace = selectionChangedWhileLoading ? currentWorkspace : "";
+					return {
+						...prev,
+						environmentId,
+						workspaceRoot: workspace,
+						cwd: workspace,
+					};
+				});
+				return;
+			}
 			const rememberedWorkspace =
+				explicitWorkspace ??
 				readWorkspaceSelectionFromWindow(environmentId).lastWorkspace;
 			const validation = rememberedWorkspace
 				? await desktopClient
@@ -1515,7 +1540,7 @@ export function useChatSession(environmentId: string) {
 					? currentWorkspace
 					: validation.valid === true
 						? rememberedWorkspace
-						: ctx.workspaceRoot || ctx.cwd;
+						: explicitWorkspace || ctx.workspaceRoot || ctx.cwd;
 				return {
 					...prev,
 					environmentId,
@@ -1526,7 +1551,7 @@ export function useChatSession(environmentId: string) {
 		} catch {
 			// Ignore in non-Tauri mode.
 		}
-	}, [environmentId]);
+	}, [environmentId, initialWorkspacePath]);
 
 	useEffect(() => {
 		void applyProcessContext();
@@ -3957,7 +3982,9 @@ export function useChatSession(environmentId: string) {
 			// source a freshly mounted thread uses) so a reset after viewing
 			// a historical session does not retain that session's
 			// provider/model for the next chat.
-			const initial = getInitialChatConfig(environmentId);
+			const initial = getInitialChatConfig(environmentId, {
+				initialWorkspacePath,
+			});
 			// A task worktree belongs to the thread that created it; the next
 			// thread goes back to the remembered repo (and its branch).
 			const leavingTaskWorktree = isTaskWorktreePath(
@@ -3974,7 +4001,9 @@ export function useChatSession(environmentId: string) {
 				model: initial.model,
 				apiKey:
 					prev.provider === initial.provider ? prev.apiKey : initial.apiKey,
-				...(switchingTarget || leavingTaskWorktree
+				...(switchingTarget ||
+				leavingTaskWorktree ||
+				initialWorkspacePath !== undefined
 					? { workspaceRoot: initial.workspaceRoot, cwd: initial.cwd }
 					: {}),
 			};
@@ -4007,6 +4036,7 @@ export function useChatSession(environmentId: string) {
 	}, [
 		sessionId,
 		environmentId,
+		initialWorkspacePath,
 		clearAbortFallbackTimeout,
 		discardPendingStream,
 		postSession,
