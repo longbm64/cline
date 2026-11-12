@@ -31,6 +31,8 @@ export function normalizeMentionPath(path: string): string {
 	return `${path.startsWith("/") ? "/" : ""}${segments.join("/")}`;
 }
 
+const EMPTY_HIGHLIGHTS: TokenRange[] = [];
+
 /**
  * Ranges of `input` that the sidecar acts on: a leading `/command` (it only
  * runs a command that starts the trimmed prompt) and `@path` mentions of real
@@ -41,18 +43,30 @@ export function getComposerHighlights(
 	commandNames: ReadonlySet<string>,
 	isKnownMentionPath: (path: string) => boolean,
 ): TokenRange[] {
+	if (!input) {
+		return EMPTY_HIGHLIGHTS;
+	}
+	const hasSlash = input.includes("/");
+	const hasMention = input.includes("@");
+	if (!hasSlash && !hasMention) {
+		return EMPTY_HIGHLIGHTS;
+	}
 	const highlights: TokenRange[] = [];
-	const command = /^(\s*)\/(\S+)(?=\s|$)/.exec(input);
-	if (command && commandNames.has(command[2].toLowerCase())) {
-		highlights.push({ start: command[1].length, end: command[0].length });
+	if (hasSlash && commandNames.size > 0) {
+		const command = /^(\s*)\/(\S+)(?=\s|$)/.exec(input);
+		if (command && commandNames.has(command[2].toLowerCase())) {
+			highlights.push({ start: command[1].length, end: command[0].length });
+		}
 	}
-	for (const match of input.matchAll(/(^|\s)@(\S+)/g)) {
-		const path = stripMentionTrailingPunctuation(match[2]);
-		if (!path || !isKnownMentionPath(normalizeMentionPath(path))) continue;
-		const start = match.index + match[1].length;
-		highlights.push({ start, end: start + 1 + path.length });
+	if (hasMention) {
+		for (const match of input.matchAll(/(^|\s)@(\S+)/g)) {
+			const path = stripMentionTrailingPunctuation(match[2]);
+			if (!path || !isKnownMentionPath(normalizeMentionPath(path))) continue;
+			const start = match.index + match[1].length;
+			highlights.push({ start, end: start + 1 + path.length });
+		}
 	}
-	return highlights;
+	return highlights.length > 0 ? highlights : EMPTY_HIGHLIGHTS;
 }
 
 type KnownComposerTokens = {

@@ -110,6 +110,9 @@ export function extractSubmitSummaryText(payload: ToolPayload | null): string {
 }
 
 export function parseToolPayload(raw: string): ToolPayload | null {
+	if (!raw) {
+		return null;
+	}
 	try {
 		return JSON.parse(raw) as ToolPayload;
 	} catch {

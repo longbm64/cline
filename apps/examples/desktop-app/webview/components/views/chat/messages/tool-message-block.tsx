@@ -93,6 +93,7 @@ const ToolCallRow = memo(function ToolCallRow({
 	// keep the message intact so a later result can still replace it.
 	const isRunning = inProgress && isRunActive;
 	const isCommand = summary.kind === "command";
+	const isEdit = summary.kind === "edit";
 	// submit_and_exit carries the run's final answer (scheduled tasks end with
 	// it), so surface it expanded and rendered as markdown rather than leaving
 	// it collapsed behind a code block.
@@ -249,7 +250,13 @@ const ToolCallRow = memo(function ToolCallRow({
 		elapsedSeconds >= 1 && (isRunning || isCommand)
 			? `(${formatWorkDuration(elapsedSeconds * 1000)})`
 			: undefined;
-	const triggerBadge = readLinesBadge ?? durationBadge;
+	const editRunningBadge =
+		isRunning && isEdit
+			? elapsedSeconds >= 1
+				? `Writing... (${formatWorkDuration(elapsedSeconds * 1000)})`
+				: "Writing..."
+			: undefined;
+	const triggerBadge = readLinesBadge ?? editRunningBadge ?? durationBadge;
 	const details = summary.details.map((detail, index) => {
 		const lineCount = readLineCountsByDetail[index];
 		return {
@@ -268,6 +275,7 @@ const ToolCallRow = memo(function ToolCallRow({
 		fileDiffs.length > 0 ||
 		Boolean(submitText) ||
 		Boolean(isCommand ? commandOutput || isRunning : summary.outputText) ||
+		Boolean(isEdit && isRunning) ||
 		summary.outputMedia.length > 0 ||
 		Boolean(summary.errorText) ||
 		Boolean(inputPreview) ||
@@ -403,6 +411,17 @@ const ToolCallRow = memo(function ToolCallRow({
 				{summary.errorText && summary.errorText !== commandOutput ? (
 					<div className="mt-1 break-words text-destructive">
 						{summary.errorText}
+					</div>
+				) : null}
+				{isRunning && isEdit ? (
+					<div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+						<Loader2 className="size-3.5 animate-spin" />
+						<span>
+							Writing
+							{elapsedSeconds >= 1
+								? ` (${formatWorkDuration(elapsedSeconds * 1000)})`
+								: "..."}
+						</span>
 					</div>
 				) : null}
 				{isRunning && isCommand ? (

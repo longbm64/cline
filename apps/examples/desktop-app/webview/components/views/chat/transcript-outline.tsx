@@ -21,30 +21,73 @@ import type { ChatMessage } from "@/lib/chat-schema";
 import { formatChatMessageContent } from "./message-content";
 import { isSystemSteeringMessage } from "./messages/group-messages";
 
-export function TranscriptOutline({ messages }: { messages: ChatMessage[] }) {
+export function TranscriptOutline({
+	messages,
+	onEnsureMessageRendered,
+}: {
+	messages: ChatMessage[];
+	onEnsureMessageRendered?: (messageId: string) => boolean;
+}) {
 	const { scrollToMessage } = useMessageScroller();
 	const { currentAnchorId } = useMessageScrollerVisibility();
 	const outlineRef = useRef<HTMLElement>(null);
 	const currentButtonRef = useRef<HTMLButtonElement>(null);
+	const pendingJumpFrameRef = useRef<number | null>(null);
+	const prevUserMessagesRef = useRef<ChatMessage[]>([]);
+
+	useEffect(() => {
+		return () => {
+			if (pendingJumpFrameRef.current !== null) {
+				window.cancelAnimationFrame(pendingJumpFrameRef.current);
+				pendingJumpFrameRef.current = null;
+			}
+		};
+	}, []);
+
 	const navigateToMessage = useCallback(
 		(messageId: string) => {
-			scrollToMessage(messageId, {
-				align: "start",
-				behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-					? "instant"
-					: "smooth",
+			const didExpandWindow = onEnsureMessageRendered?.(messageId) ?? false;
+			if (!didExpandWindow) {
+				scrollToMessage(messageId, {
+					align: "start",
+					behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
+						.matches
+						? "instant"
+						: "smooth",
+				});
+				return;
+			}
+			// Wait one animation frame for newly revealed older transcript items to
+			// register with MessageScroller, then jump directly to avoid smooth-
+			// scrolling across a freshly mounted multi-screen span.
+			if (pendingJumpFrameRef.current !== null) {
+				window.cancelAnimationFrame(pendingJumpFrameRef.current);
+			}
+			pendingJumpFrameRef.current = window.requestAnimationFrame(() => {
+				pendingJumpFrameRef.current = null;
+				scrollToMessage(messageId, {
+					align: "start",
+					behavior: "instant",
+				});
 			});
 		},
-		[scrollToMessage],
+		[onEnsureMessageRendered, scrollToMessage],
 	);
-	const userMessages = useMemo(
-		() =>
-			messages.filter(
-				(message) =>
-					message.role === "user" && !isSystemSteeringMessage(message),
-			),
-		[messages],
-	);
+	const userMessages = useMemo(() => {
+		const filtered = messages.filter(
+			(message) =>
+				message.role === "user" && !isSystemSteeringMessage(message),
+		);
+		const prev = prevUserMessagesRef.current;
+		if (
+			prev.length === filtered.length &&
+			filtered.every((item, idx) => item === prev[idx])
+		) {
+			return prev;
+		}
+		prevUserMessagesRef.current = filtered;
+		return filtered;
+	}, [messages]);
 	// Change only the outline's scroll offset; scrollIntoView could also move
 	// the transcript or the page. No layout reads are needed on stream flushes.
 	useEffect(() => {

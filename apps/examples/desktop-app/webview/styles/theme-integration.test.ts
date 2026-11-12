@@ -32,4 +32,23 @@ describe("@cline/ui theme integration", () => {
 		);
 		expect(result.css).not.toContain("--cline-");
 	});
+
+	it("compiles desktop theme presets cleanly alongside @cline/ui tokens", async () => {
+		const from = fileURLToPath(new URL("./theme-fixture.css", import.meta.url));
+		const result = await postcss([tailwindcss()]).process(
+			[
+				'@import "tailwindcss";',
+				'@import "@cline/ui/theme/index.css";',
+				'@import "./theme-presets.css";',
+			].join("\n"),
+			{ from },
+		);
+
+		expect(result.css).toContain('[data-cline-theme="dracula"]');
+		expect(result.css).toContain('[data-cline-theme="sunset"]');
+		expect(result.css).toContain('[data-cline-theme="ocean"]');
+		expect(result.css).toContain("#282a36");
+		expect(result.css).toContain("#ea580c");
+		expect(result.css).toContain("#0e7490");
+	});
 });

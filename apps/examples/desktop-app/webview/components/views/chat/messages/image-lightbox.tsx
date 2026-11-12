@@ -1,6 +1,7 @@
 "use client";
 
 import { AgentImageLightboxContent } from "@cline/ui";
+import { resolveChatMessageImageSrc } from "@/hooks/chat-session/attachments";
 import type { ChatMessageImage } from "@/lib/chat-schema";
 
 export function ChatImageLightbox({
@@ -18,7 +19,7 @@ export function ChatImageLightbox({
 			role="dialog"
 		>
 			<AgentImageLightboxContent
-				src={`data:${image.mediaType};base64,${image.data}`}
+				src={resolveChatMessageImageSrc(image)}
 				alt="Expanded attachment"
 				onClose={onClose}
 			/>

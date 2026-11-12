@@ -32,6 +32,7 @@ import { cn } from "@/lib/utils";
 import { MemoizedMarkdown } from "../../../ui/markdown";
 import { formatChatMessageContent } from "../message-content";
 import { ArtifactImage } from "./artifact-image";
+import { ChatMessageImg } from "./chat-message-image";
 import {
 	formatTaskCompletionDurationVi,
 	isSystemSteeringMessage,
@@ -60,15 +61,15 @@ function MessageImages({
 				<button
 					aria-label={`Expand attachment ${index + 1}`}
 					className="cursor-zoom-in overflow-hidden rounded-lg border border-border bg-muted text-left transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-					key={image.id}
+					// biome-ignore lint/suspicious/noArrayIndexKey: Attachment order on a sent message never changes, whereas image.id re-keys across optimistic, queued, and canonical history updates.
+					key={`${index}:${image.mediaType}`}
 					onClick={() => onExpandImage?.(image)}
 					type="button"
 				>
-					{/* biome-ignore lint/performance/noImgElement: In-memory data URLs do not have dimensions and cannot use Next's optimizer. */}
-					<img
+					<ChatMessageImg
 						alt={`Attachment ${index + 1}`}
 						className="max-h-56.25 max-w-56.25 object-contain"
-						src={`data:${image.mediaType};base64,${image.data}`}
+						image={image}
 					/>
 				</button>
 			))}

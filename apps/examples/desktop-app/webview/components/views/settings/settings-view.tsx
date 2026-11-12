@@ -1,5 +1,5 @@
 import { Switch } from "@cline/ui";
-import { Minus, Plus, RotateCcw } from "lucide-react";
+import { Check, Minus, Plus, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,13 +50,17 @@ import type {
 	ProviderSettingsUpdate,
 } from "@/lib/provider-schema";
 import {
+	DEFAULT_HUB_THEME_PRESET,
+	HUB_THEME_PRESETS,
 	type HubAccent,
-	type HubTheme,
+	type HubThemePresetDefinition,
+	type HubThemePresetId,
 	readStoredHubAccent,
-	readStoredHubTheme,
-	readSystemHubTheme,
+	readStoredHubThemePreset,
+	selectHubThemePreset,
 	setStoredHubAccent,
-	setStoredHubTheme,
+	subscribeToHubAccent,
+	subscribeToHubThemePreset,
 } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import {
@@ -689,7 +693,11 @@ export function SettingsView({
  * violet reads the live brand token so it always matches the default theme.
  */
 const ACCENT_OPTIONS: { id: HubAccent; label: string; swatch: string }[] = [
-	{ id: "violet", label: "Violet", swatch: "var(--brand-violet)" },
+	{
+		id: "violet",
+		label: "Theme default",
+		swatch: "var(--theme-preset-swatch, var(--brand-violet))",
+	},
 	{ id: "graphite", label: "Graphite", swatch: "oklch(0.27 0.012 248)" },
 	{ id: "cyan", label: "Cyan", swatch: "oklch(0.6 0.12 222)" },
 	{ id: "pink", label: "Pink", swatch: "oklch(0.75 0.1 354)" },
@@ -697,11 +705,121 @@ const ACCENT_OPTIONS: { id: HubAccent; label: string; swatch: string }[] = [
 	{ id: "ember", label: "Ember", swatch: "oklch(0.6 0.19 33)" },
 ];
 
+type ThemeModeFilter = "all" | "light" | "dark";
+
+const THEME_FILTER_OPTIONS: { id: ThemeModeFilter; label: string }[] = [
+	{ id: "all", label: "All" },
+	{ id: "light", label: "Light" },
+	{ id: "dark", label: "Dark" },
+];
+
+function ThemePresetMiniPreview({
+	preset,
+}: {
+	preset: HubThemePresetDefinition;
+}) {
+	if (preset.id === "system") {
+		return (
+			<div
+				aria-hidden="true"
+				className="grid h-14 w-full grid-cols-2 overflow-hidden rounded-md border border-border/80"
+			>
+				<div className="flex h-full bg-[#fbfbfe]">
+					<div className="w-4 border-r border-[#e2e1ec] bg-[#f6f6fb] p-1">
+						<div className="h-1 w-full rounded-full bg-[#5c5c70]/40" />
+					</div>
+					<div className="flex flex-1 flex-col justify-between p-1.5">
+						<div className="space-y-1 rounded border border-[#e2e1ec] bg-[#efeef7] p-1">
+							<div className="h-1 w-4/5 rounded-full bg-[#1d1d26]/75" />
+							<div className="h-1 w-1/2 rounded-full bg-[#5c5c70]/55" />
+						</div>
+						<div className="h-1.5 w-5 self-end rounded-full bg-[#5b5bd6]" />
+					</div>
+				</div>
+				<div className="flex h-full border-l border-[#2a2a35] bg-[#121216]">
+					<div className="w-4 border-r border-[#2a2a35] bg-[#19191f] p-1">
+						<div className="h-1 w-full rounded-full bg-[#a0a0b0]/40" />
+					</div>
+					<div className="flex flex-1 flex-col justify-between p-1.5">
+						<div className="space-y-1 rounded border border-[#2a2a35] bg-[#212129] p-1">
+							<div className="h-1 w-4/5 rounded-full bg-[#f5f5f7]/80" />
+							<div className="h-1 w-1/2 rounded-full bg-[#a0a0b0]/55" />
+						</div>
+						<div className="h-1.5 w-5 self-end rounded-full bg-[#6e6ade]" />
+					</div>
+				</div>
+			</div>
+		);
+	}
+
+	const { preview } = preset;
+	return (
+		<div
+			aria-hidden="true"
+			className="flex h-14 w-full overflow-hidden rounded-md border"
+			style={{
+				backgroundColor: preview.background,
+				borderColor: preview.border,
+			}}
+		>
+			<div
+				className="flex w-1/4 flex-col gap-1 border-r p-1.5"
+				style={{
+					backgroundColor: preview.sidebar,
+					borderColor: preview.border,
+				}}
+			>
+				<div
+					className="h-1 w-4/5 rounded-full opacity-65"
+					style={{ backgroundColor: preview.foreground }}
+				/>
+				<div
+					className="h-1 w-3/5 rounded-full opacity-45"
+					style={{ backgroundColor: preview.muted }}
+				/>
+				<div
+					className="mt-auto h-1 w-2/3 rounded-full opacity-40"
+					style={{ backgroundColor: preview.muted }}
+				/>
+			</div>
+			<div className="flex flex-1 flex-col justify-between p-1.5">
+				<div
+					className="space-y-1 rounded border p-1"
+					style={{
+						backgroundColor: preview.card,
+						borderColor: preview.border,
+					}}
+				>
+					<div
+						className="h-1 w-3/4 rounded-full opacity-85"
+						style={{ backgroundColor: preview.foreground }}
+					/>
+					<div
+						className="h-1 w-1/2 rounded-full opacity-60"
+						style={{ backgroundColor: preview.muted }}
+					/>
+				</div>
+				<div className="flex items-center justify-between gap-1">
+					<div
+						className="h-1 w-1/3 rounded-full opacity-45"
+						style={{ backgroundColor: preview.muted }}
+					/>
+					<div
+						className="h-2 w-5 rounded-full"
+						style={{ backgroundColor: preview.primary }}
+					/>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 function GeneralSettingsContent() {
-	const [theme, setTheme] = useState<HubTheme>(() => {
-		if (typeof window === "undefined") return "light";
-		return readStoredHubTheme() ?? readSystemHubTheme();
+	const [themePreset, setThemePreset] = useState<HubThemePresetId>(() => {
+		if (typeof window === "undefined") return DEFAULT_HUB_THEME_PRESET;
+		return readStoredHubThemePreset();
 	});
+	const [themeFilter, setThemeFilter] = useState<ThemeModeFilter>("all");
 	const [accent, setAccent] = useState<HubAccent>(() => {
 		if (typeof window === "undefined") return "violet";
 		return readStoredHubAccent();
@@ -730,6 +848,8 @@ function GeneralSettingsContent() {
 
 	useEffect(() => setAppIconLocation(appIconSurface(navigator.userAgent)), []);
 	useEffect(() => subscribeToAppFontSize(setFontSize), []);
+	useEffect(() => subscribeToHubThemePreset(setThemePreset), []);
+	useEffect(() => subscribeToHubAccent(setAccent), []);
 
 	const loadGlobalSettings = useCallback(async () => {
 		setTelemetryLoading(true);
@@ -799,10 +919,16 @@ function GeneralSettingsContent() {
 		}
 	};
 
-	const updateTheme = (darkModeEnabled: boolean) => {
-		const nextTheme = darkModeEnabled ? "dark" : "light";
-		setTheme(setStoredHubTheme(nextTheme));
+	const updateThemePreset = (nextPreset: HubThemePresetId) => {
+		setThemePreset(selectHubThemePreset(nextPreset));
+		setAccent(readStoredHubAccent());
 	};
+
+	const visibleThemePresets = HUB_THEME_PRESETS.filter((preset) => {
+		if (themeFilter === "all") return true;
+		if (preset.mode === "system") return true;
+		return preset.mode === themeFilter;
+	});
 
 	const updateAccent = (nextAccent: HubAccent) => {
 		setAccent(setStoredHubAccent(nextAccent));
@@ -850,18 +976,74 @@ function GeneralSettingsContent() {
 			/>
 			<section className="max-w-344">
 				<NotificationSettings />
-				<div className="flex py-4 items-center justify-between gap-5 border-b max-[720px]:flex-col max-[720px]:items-stretch max-[720px]:py-4">
-					<div className="flex flex-col gap-1">
-						<p className="text-base font-semibold text-foreground">Dark mode</p>
-						<p className="text-sm text-muted-foreground">
-							Keep the desktop interface in dark mode on this browser.
-						</p>
+				<div className="flex flex-col gap-3.5 border-b py-4">
+					<div className="flex items-start justify-between gap-4 max-[720px]:flex-col max-[720px]:items-stretch">
+						<div className="flex flex-col gap-1">
+							<p className="text-base font-semibold text-foreground">Theme</p>
+							<p className="text-sm text-muted-foreground">
+								Choose a color theme preset for the interface, code blocks,
+								diffs, and terminal.
+							</p>
+						</div>
+						<fieldset
+							aria-label="Filter themes by mode"
+							className="inline-flex shrink-0 items-center gap-0.5 self-start rounded-lg border bg-muted/60 p-0.5"
+						>
+							{THEME_FILTER_OPTIONS.map((option) => {
+								const active = themeFilter === option.id;
+								return (
+									<button
+										aria-pressed={active}
+										className={cn(
+											"rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+											active
+												? "bg-background text-foreground shadow-xs"
+												: "text-muted-foreground hover:text-foreground",
+										)}
+										key={option.id}
+										onClick={() => setThemeFilter(option.id)}
+										type="button"
+									>
+										{option.label}
+									</button>
+								);
+							})}
+						</fieldset>
 					</div>
-					<Switch
-						aria-label="Dark mode"
-						checked={theme === "dark"}
-						onCheckedChange={updateTheme}
-					/>
+					<div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
+						{visibleThemePresets.map((preset) => {
+							const selected = themePreset === preset.id;
+							return (
+								<button
+									aria-label={`Theme: ${preset.label}`}
+									aria-pressed={selected}
+									className={cn(
+										"group flex flex-col gap-2 rounded-xl border bg-card/40 p-2 text-left transition-all hover:border-foreground/25 hover:bg-surface-hover-lighter focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+										selected &&
+											"border-primary bg-accent/35 ring-1 ring-primary",
+									)}
+									key={preset.id}
+									onClick={() => updateThemePreset(preset.id)}
+									type="button"
+								>
+									<ThemePresetMiniPreview preset={preset} />
+									<div className="flex min-w-0 items-center justify-between gap-1.5 px-0.5">
+										<div className="min-w-0">
+											<p className="truncate text-xs font-semibold text-foreground">
+												{preset.label}
+											</p>
+											<p className="truncate text-[11px] text-muted-foreground">
+												{preset.description}
+											</p>
+										</div>
+										{selected ? (
+											<Check className="size-3.5 shrink-0 text-primary" />
+										) : null}
+									</div>
+								</button>
+							);
+						})}
+					</div>
 				</div>
 				<div className="flex items-center justify-between gap-5 border-b py-4 max-[720px]:flex-col max-[720px]:items-stretch">
 					<div className="flex flex-col gap-1">

@@ -3763,3 +3763,175 @@ describe("ChatInputBar compact layout", () => {
 		}
 	});
 });
+
+describe("ChatInputBar image attachment preview and modal", () => {
+	let container: HTMLDivElement;
+	let root: ReturnType<typeof createRoot>;
+
+	beforeEach(() => {
+		Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+		container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+	});
+
+	afterEach(async () => {
+		await act(async () => {
+			root.unmount();
+		});
+		container.remove();
+	});
+
+	it("renders attached images as clickable preview thumbnails and opens a full-image modal on click", async () => {
+		const onRemoveAttachment = vi.fn();
+		const previewUrlA =
+			"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+		const previewUrlB = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
+		const attachments = [
+			{
+				id: "img-1",
+				name: "first-screen.png",
+				isImage: true,
+				previewUrl: previewUrlA,
+			},
+			{
+				id: "img-2",
+				name: "second-screen.jpg",
+				isImage: true,
+				previewUrl: previewUrlB,
+			},
+			{
+				id: "file-1",
+				name: "spec.md",
+				isImage: false,
+			},
+		];
+
+		const renderBar = async (
+			nextAttachments: Parameters<
+				typeof ChatInputBar
+			>[0]["attachments"] = attachments,
+		) => {
+			await act(async () => {
+				root.render(
+					<WorkspaceProvider
+						value={{
+							workspaceRoot: "/workspace/cline",
+							workspaces: ["/workspace/cline"],
+							listWorkspaces: vi.fn(async () => ["/workspace/cline"]),
+							refreshWorkspaces: vi.fn(async () => undefined),
+							switchWorkspace: vi.fn(async () => true),
+							pickWorkspaceDirectory: vi.fn(async () => null),
+							selectChat: vi.fn(async () => true),
+						}}
+					>
+						<ChatInputBar
+							attachments={nextAttachments}
+							environmentId="local"
+							gitBranch="main"
+							mode="act"
+							model="test-model"
+							onAbort={vi.fn()}
+							onAttachFiles={vi.fn()}
+							onEditPromptInQueue={vi.fn()}
+							onListGitBranches={vi.fn(async () => ({
+								current: "main",
+								branches: ["main"],
+							}))}
+							onModeToggle={vi.fn()}
+							onModelChange={vi.fn()}
+							onPromptInputChange={vi.fn()}
+							onProviderChange={vi.fn()}
+							onReasoningChange={vi.fn()}
+							onRemoveAttachment={onRemoveAttachment}
+							onRemovePromptInQueue={vi.fn()}
+							onSend={vi.fn()}
+							onSteerPromptInQueue={vi.fn()}
+							onSwitchGitBranch={vi.fn(async () => true)}
+							promptDraft={{ version: 0, value: "" }}
+							promptsInQueue={[]}
+							provider="cline"
+							reasoningEffort="low"
+							status="idle"
+							summary={{ toolCalls: 0, tokensIn: 0, tokensOut: 0 }}
+							thinking
+						/>
+					</WorkspaceProvider>,
+				);
+				await Promise.resolve();
+			});
+		};
+
+		await renderBar();
+
+		// Thumbnails are rendered as images rather than "image: ..." text pills.
+		const previewButtons = container.querySelectorAll<HTMLButtonElement>(
+			'button[aria-label^="Preview "]',
+		);
+		expect(previewButtons).toHaveLength(2);
+		expect(previewButtons[0]?.querySelector("img")?.getAttribute("src")).toBe(
+			previewUrlA,
+		);
+		expect(previewButtons[1]?.querySelector("img")?.getAttribute("src")).toBe(
+			previewUrlB,
+		);
+		expect(container.textContent).not.toContain("image: first-screen.png");
+		expect(container.textContent).toContain("file: spec.md");
+
+		// Modal is initially closed.
+		expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+		// Clicking the first image opens the full-image preview modal.
+		await act(async () => {
+			previewButtons[0]?.click();
+		});
+
+		const dialog = document.querySelector('[role="dialog"]');
+		expect(dialog).not.toBeNull();
+		expect(dialog?.textContent).toContain("first-screen.png");
+		expect(dialog?.textContent).toContain("1 / 2");
+		expect(dialog?.querySelector("img")?.getAttribute("src")).toBe(previewUrlA);
+
+		// Navigate to the second image via Next button.
+		const nextBtn = dialog?.querySelector<HTMLButtonElement>(
+			'button[aria-label="Next image"]',
+		);
+		expect(nextBtn).not.toBeNull();
+		await act(async () => {
+			nextBtn?.click();
+		});
+		expect(dialog?.textContent).toContain("second-screen.jpg");
+		expect(dialog?.textContent).toContain("2 / 2");
+		expect(dialog?.querySelector("img")?.getAttribute("src")).toBe(previewUrlB);
+
+		// Navigate back via ArrowLeft key.
+		await act(async () => {
+			dialog?.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+			);
+		});
+		expect(dialog?.textContent).toContain("first-screen.png");
+		expect(dialog?.querySelector("img")?.getAttribute("src")).toBe(previewUrlA);
+
+		// Close modal via close button.
+		const closeBtn = dialog?.querySelector<HTMLButtonElement>(
+			'[data-slot="dialog-close"]',
+		);
+		expect(closeBtn).not.toBeNull();
+		await act(async () => {
+			closeBtn?.click();
+		});
+		expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+		// Clicking Remove on a thumbnail removes the attachment without opening the modal.
+		const removeFirstBtn = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Remove first-screen.png"]',
+		);
+		expect(removeFirstBtn).not.toBeNull();
+		await act(async () => {
+			removeFirstBtn?.click();
+		});
+		expect(onRemoveAttachment).toHaveBeenCalledWith("img-1");
+		expect(document.querySelector('[role="dialog"]')).toBeNull();
+	});
+});

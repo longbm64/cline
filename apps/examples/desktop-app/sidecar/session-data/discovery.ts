@@ -1,6 +1,5 @@
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { SqliteSessionStore } from "@cline/core";
 import { readSessionManifest, sharedSessionDataDir } from "../paths";
 import type { JsonRecord } from "../types";
 import {
@@ -9,6 +8,7 @@ import {
 	resolveSessionListTitle,
 } from "./common";
 import { readPersistedChatMessages } from "./messages";
+import { getSharedSessionStore } from "./store";
 
 /**
  * Minimal context shape required by discoverChatSessions so both the host
@@ -46,7 +46,7 @@ export function discoverChatSessions(
 	limit = 300,
 ): unknown[] {
 	const out: JsonRecord[] = [];
-	const store = new SqliteSessionStore();
+	const store = getSharedSessionStore();
 	for (const [sessionId, session] of ctx.liveSessions.entries()) {
 		if (session.config.executionTarget === "cloud") {
 			continue;

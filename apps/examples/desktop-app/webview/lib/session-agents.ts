@@ -173,6 +173,20 @@ function collectRunReports(
 	return out;
 }
 
+const parsedToolPayloadByMessage = new WeakMap<
+	ChatMessage,
+	ToolPayload | null
+>();
+
+function getCachedToolPayload(message: ChatMessage): ToolPayload | undefined {
+	if (parsedToolPayloadByMessage.has(message)) {
+		return parsedToolPayloadByMessage.get(message) ?? undefined;
+	}
+	const parsed = (parseJson(message.content) as ToolPayload | undefined) ?? null;
+	parsedToolPayloadByMessage.set(message, parsed);
+	return parsed ?? undefined;
+}
+
 /**
  * Fold a session's tool messages into per-run states.
  *
@@ -182,13 +196,31 @@ function collectRunReports(
  * background, so it is keyed by that runId and its state is refined by any
  * later team_await_runs / team_list_runs / team_cancel_run result.
  */
+function isRealUserTurnBoundary(message: ChatMessage): boolean {
+	return (
+		message.role === "user" &&
+		!(
+			message.meta?.userRunSpan === 0 &&
+			message.content.trimStart().startsWith("[SYSTEM]")
+		)
+	);
+}
+
 function collectAgentRunStates(
 	messages: ChatMessage[],
 ): Map<string, SessionAgentRunState> {
 	const states = new Map<string, SessionAgentRunState>();
 	const asyncRunIds = new Set<string>();
+	let lastUserTurnIndex = -1;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (isRealUserTurnBoundary(messages[index])) {
+			lastUserTurnIndex = index;
+			break;
+		}
+	}
 
-	for (const message of messages) {
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
 		if (message.role !== "tool") {
 			continue;
 		}
@@ -202,7 +234,7 @@ function collectAgentRunStates(
 		if (metaToolName && !isRunTool && !isReportTool) {
 			continue;
 		}
-		const payload = parseJson(message.content) as ToolPayload | undefined;
+		const payload = getCachedToolPayload(message);
 		const toolName = metaToolName || normalizeToolName(payload?.toolName);
 		if (!toolName) {
 			continue;
@@ -223,7 +255,10 @@ function collectAgentRunStates(
 		}
 
 		if (isToolCallInProgress(message.meta?.hookEventName, payload ?? null)) {
-			states.set(message.id, "running");
+			states.set(
+				message.id,
+				index < lastUserTurnIndex ? "unresolved" : "running",
+			);
 			continue;
 		}
 		if (payload?.isError) {
@@ -344,13 +379,20 @@ export function agentEntryState(status: string): SessionAgentRunState {
 
 export function summarizeAgentEntries(
 	entries: SessionAgentEntry[],
+	options?: { sessionActive?: boolean },
 ): SessionAgentActivity {
+	const sessionActive = options?.sessionActive ?? true;
 	const activity: SessionAgentActivity = {
 		...EMPTY_AGENT_ACTIVITY,
 		total: entries.length,
 	};
 	for (const entry of entries) {
-		activity[agentEntryState(entry.status)] += 1;
+		const state = agentEntryState(entry.status);
+		if (state === "running" && !sessionActive) {
+			activity.unresolved += 1;
+			continue;
+		}
+		activity[state] += 1;
 	}
 	return activity;
 }
@@ -372,13 +414,13 @@ export function mergeAgentActivity(
 	if (entries.length === 0) {
 		return derived;
 	}
-	const roster = summarizeAgentEntries(entries);
+	const sessionActive = options?.sessionActive ?? false;
+	const roster = summarizeAgentEntries(entries, { sessionActive });
 	if (derived.total <= roster.total) {
 		return roster;
 	}
 	// Extra spawns the roster has not caught up with are still in flight.
 	const pending = derived.total - roster.total;
-	const sessionActive = options?.sessionActive ?? false;
 	return {
 		...roster,
 		total: derived.total,

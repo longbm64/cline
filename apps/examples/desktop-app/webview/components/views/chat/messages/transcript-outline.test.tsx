@@ -40,8 +40,18 @@ afterEach(async () => {
 	container.remove();
 	vi.restoreAllMocks();
 });
-async function render(messages: ChatMessage[]) {
-	await act(async () => root.render(<TranscriptOutline messages={messages} />));
+async function render(
+	messages: ChatMessage[],
+	onEnsureMessageRendered?: (messageId: string) => boolean,
+) {
+	await act(async () =>
+		root.render(
+			<TranscriptOutline
+				messages={messages}
+				onEnsureMessageRendered={onEnsureMessageRendered}
+			/>,
+		),
+	);
 }
 function user(index: number, content = `Prompt ${index}`): ChatMessage {
 	return {
@@ -141,5 +151,34 @@ describe("TranscriptOutline", () => {
 		} finally {
 			transcript.remove();
 		}
+	});
+
+	it("expands unrendered history before scrolling when clicking an older prompt", async () => {
+		const prompts = Array.from({ length: 10 }, (_, index) => user(index));
+		const onEnsureMessageRendered = vi.fn((id: string) => id === "user-0");
+		const rafCallbacks: FrameRequestCallback[] = [];
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+			rafCallbacks.push(cb);
+			return rafCallbacks.length;
+		});
+
+		await render(prompts, onEnsureMessageRendered);
+
+		const buttons = container.querySelectorAll("button");
+		await act(async () => {
+			buttons[0]?.click();
+		});
+		expect(onEnsureMessageRendered).toHaveBeenCalledWith("user-0");
+		expect(scroller.scrollToMessage).not.toHaveBeenCalled();
+
+		await act(async () => {
+			for (const cb of rafCallbacks.splice(0)) {
+				cb(16);
+			}
+		});
+		expect(scroller.scrollToMessage).toHaveBeenCalledWith("user-0", {
+			align: "start",
+			behavior: "instant",
+		});
 	});
 });

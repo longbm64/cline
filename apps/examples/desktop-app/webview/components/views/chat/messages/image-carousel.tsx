@@ -3,6 +3,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ChatMessageImage } from "@/lib/chat-schema";
+import { ChatMessageImg } from "./chat-message-image";
 
 export function MessageImageCarousel({
 	images,
@@ -30,11 +31,10 @@ export function MessageImageCarousel({
 				onClick={() => onExpandImage?.(image)}
 				type="button"
 			>
-				{/* biome-ignore lint/performance/noImgElement: In-memory data URLs do not have dimensions and cannot use Next's optimizer. */}
-				<img
+				<ChatMessageImg
 					alt={`Generated result ${safeIndex + 1}`}
 					className="max-h-56.25 max-w-56.25 object-contain"
-					src={`data:${image.mediaType};base64,${image.data}`}
+					image={image}
 				/>
 			</button>
 			{images.length > 1 ? (

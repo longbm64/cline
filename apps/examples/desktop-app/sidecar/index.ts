@@ -131,11 +131,17 @@ async function main(desktopCliPath?: string) {
 
 	let shuttingDown = false;
 	let handlingFatalError = false;
+	const initialParentPid = process.ppid;
+	let parentWatchTimer: ReturnType<typeof setInterval> | undefined;
 	const shutdown = async (reason = "code_sidecar_shutdown"): Promise<void> => {
 		if (shuttingDown) {
 			return;
 		}
 		shuttingDown = true;
+		if (parentWatchTimer) {
+			clearInterval(parentWatchTimer);
+			parentWatchTimer = undefined;
+		}
 		observability.logger.log("Desktop sidecar shutting down", { reason });
 		await withTimeout(
 			(async () => {
@@ -157,6 +163,18 @@ async function main(desktopCliPath?: string) {
 
 	process.once("SIGINT", () => shutdownAndExit("SIGINT"));
 	process.once("SIGTERM", () => shutdownAndExit("SIGTERM"));
+	if (initialParentPid > 1) {
+		parentWatchTimer = setInterval(() => {
+			if (process.ppid <= 1 || process.ppid !== initialParentPid) {
+				if (parentWatchTimer) {
+					clearInterval(parentWatchTimer);
+					parentWatchTimer = undefined;
+				}
+				shutdownAndExit("PARENT_EXITED");
+			}
+		}, 5_000);
+		parentWatchTimer.unref?.();
+	}
 	const handleFatalError = (kind: string, error: unknown): void => {
 		if (handlingFatalError) {
 			process.exit(1);

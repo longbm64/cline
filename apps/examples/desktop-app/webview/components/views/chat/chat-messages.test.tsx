@@ -2898,3 +2898,293 @@ describe("ChatMessages last turn receipt", () => {
 		expect(receipts()).toHaveLength(0);
 	});
 });
+
+describe("ChatMessages progressive upward lazy loading", () => {
+	it("lazy-loads older messages on upward scroll while preserving scroll offset", async () => {
+		const longHistory: ChatMessage[] = [];
+		for (let turn = 0; turn < 30; turn++) {
+			longHistory.push({
+				id: `u-${turn}`,
+				sessionId: "session-long",
+				role: "user",
+				content: `User prompt #${turn}`,
+				createdAt: turn * 10 + 1,
+			});
+			longHistory.push({
+				id: `a-${turn}`,
+				sessionId: "session-long",
+				role: "assistant",
+				content: `Assistant reply #${turn}`,
+				createdAt: turn * 10 + 2,
+			});
+		}
+
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(400);
+		vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
+			function (this: HTMLElement) {
+				return container.querySelectorAll("[data-message-id]").length * 100;
+			},
+		);
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+			function (this: HTMLElement) {
+				const vp = container.querySelector<HTMLElement>(
+					'[data-slot="message-scroller-viewport"]',
+				);
+				if (this === vp) {
+					return {
+						top: 0,
+						bottom: 400,
+						height: 400,
+						left: 0,
+						right: 800,
+						width: 800,
+						x: 0,
+						y: 0,
+						toJSON() {},
+					};
+				}
+				const rows = [...container.querySelectorAll("[data-message-id]")];
+				const index = rows.indexOf(this);
+				const top = index < 0 ? 0 : index * 100 - (vp?.scrollTop ?? 0);
+				return {
+					top,
+					bottom: top + 100,
+					height: 100,
+					left: 0,
+					right: 800,
+					width: 800,
+					x: 0,
+					y: top,
+					toJSON() {},
+				};
+			},
+		);
+		HTMLElement.prototype.scrollTo = vi.fn(function (
+			this: HTMLElement,
+			options?: ScrollToOptions | number,
+		) {
+			this.scrollTop =
+				typeof options === "number" ? options : (options?.top ?? 0);
+		});
+
+		await renderMessages(longHistory, { sessionId: "session-long" });
+
+		const viewport = container.querySelector<HTMLElement>(
+			'[data-slot="message-scroller-viewport"]',
+		);
+		expect(viewport).not.toBeNull();
+		// 60 items total; only the latest 28 mount initially (32 hidden).
+		expect(viewport?.getAttribute("data-hidden-item-count")).toBe("32");
+		expect(container.querySelector('[data-message-id="u-0"]')).toBeNull();
+		expect(container.querySelector('[data-message-id="a-29"]')).not.toBeNull();
+
+		// Clear auto-scroll attribute after initial bottom placement and simulate
+		// user scrolling upward into the lazy-load threshold zone (scrollTop = 300).
+		viewport?.removeAttribute("data-autoscrolling");
+		await act(async () => {
+			if (!viewport) return;
+			viewport.dispatchEvent(
+				new WheelEvent("wheel", { deltaY: -500, bubbles: true }),
+			);
+			viewport.scrollTop = 300;
+			viewport.dispatchEvent(new Event("scroll"));
+			await new Promise((resolve) => setTimeout(resolve, 32));
+		});
+
+		// 20 older items (20 * 100px = 2000px) prepended; 12 remain hidden, and
+		// scrollTop shifted from 300 -> 2300 so the visible message stays rock-steady!
+		expect(viewport?.getAttribute("data-hidden-item-count")).toBe("12");
+		expect(viewport?.scrollTop).toBe(2300);
+		expect(container.querySelector('[data-message-id="u-6"]')).not.toBeNull();
+		expect(container.querySelector('[data-message-id="u-0"]')).toBeNull();
+
+		// Clicking the very first prompt in TranscriptOutline expands the rest of
+		// history and jumps directly to u-0.
+		vi.stubGlobal(
+			"matchMedia",
+			vi.fn(() => ({ matches: true })),
+		);
+		const firstOutlineButton = container.querySelector<HTMLButtonElement>(
+			'nav[aria-label="Transcript outline"] button',
+		);
+		expect(firstOutlineButton).not.toBeNull();
+		await act(async () => {
+			firstOutlineButton?.click();
+			await new Promise((resolve) => setTimeout(resolve, 32));
+		});
+
+		expect(viewport?.getAttribute("data-hidden-item-count")).toBeNull();
+		expect(container.querySelector('[data-message-id="u-0"]')).not.toBeNull();
+		vi.unstubAllGlobals();
+	});
+});
+
+describe("ChatMessages file-writing activity indicators", () => {
+	beforeEach(() => {
+		vi.stubGlobal(
+			"ResizeObserver",
+			class {
+				observe() {}
+				unobserve() {}
+				disconnect() {}
+			},
+		);
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("shows streamingToolLabel (Writing...) below completed edit rows while streaming next edit arguments", async () => {
+		await renderMessages(
+			[
+				{
+					id: "u-1",
+					sessionId: "session-1",
+					role: "user",
+					content: "update index.html",
+					createdAt: 1,
+				},
+				{
+					id: "t-1",
+					sessionId: "session-1",
+					role: "tool",
+					content: JSON.stringify({
+						toolName: "editor",
+						input: {
+							path: "/Users/app/web/index.html",
+							insert_line: 10,
+							new_text: "setElText('stat-saved-tokens', '0');",
+						},
+						result: "ok",
+					}),
+					createdAt: 2,
+				},
+			],
+			{
+				status: "running",
+				streamingToolLabel: "Inserting into index.html · Writing...",
+			},
+		);
+
+		const activity = container.querySelector('[data-message-id="activity"]');
+		expect(activity?.textContent).toContain(
+			"Inserting into index.html · Writing...",
+		);
+	});
+
+	it("marks in-progress file edits with Writing... on both the tool row and bottom activity indicator", async () => {
+		await renderMessages(
+			[
+				{
+					id: "t-edit-live",
+					sessionId: "session-1",
+					role: "tool",
+					content: JSON.stringify({
+						toolName: "editor",
+						input: {
+							path: "/Users/app/web/index.html",
+							insert_line: 10,
+							new_text: "setElText('stat-saved-tokens', '0');",
+						},
+						result: null,
+					}),
+					createdAt: 1,
+					meta: {
+						toolName: "editor",
+						hookEventName: "tool_call_start",
+					},
+				},
+			],
+			{ status: "running" },
+		);
+
+		expect(
+			container.querySelector(".cline-chat-tool-label")?.textContent,
+		).toContain("Writing...");
+		expect(
+			container.querySelector('[data-message-id="activity"]')?.textContent,
+		).toContain("Inserting into index.html · Writing...");
+	});
+
+	it("keeps the activity indicator visible when streamingMessageId points to an empty assistant placeholder", async () => {
+		await renderMessages(
+			[
+				{
+					id: "u-1",
+					sessionId: "session-1",
+					role: "user",
+					content: "edit file",
+					createdAt: 1,
+				},
+				{
+					id: "a-empty",
+					sessionId: "session-1",
+					role: "assistant",
+					content: "",
+					createdAt: 2,
+				},
+			],
+			{
+				status: "running",
+				streamingMessageId: "a-empty",
+			},
+		);
+
+		const activity = container.querySelector('[data-message-id="activity"]');
+		expect(activity).not.toBeNull();
+		expect(activity?.textContent).toContain("Thinking...");
+	});
+
+	it("does not unmount the scroller or flash pending-scroll when a new chat receives its first sessionId", async () => {
+		const optimisticPrompt: ChatMessage = {
+			id: "user_opt_1",
+			sessionId: "planned_session_1",
+			role: "user",
+			content: "Build smooth chat UX",
+			createdAt: 1,
+			meta: { clientRenderKey: "user_opt_1" },
+		};
+
+		await renderMessages([optimisticPrompt], {
+			sessionId: null,
+			status: "starting",
+		});
+
+		const viewportBefore = container.querySelector<HTMLElement>(
+			'[data-slot="message-scroller-viewport"]',
+		);
+		const promptNodeBefore = container.querySelector<HTMLElement>(
+			'[data-message-id="user_opt_1"]',
+		);
+		expect(viewportBefore).not.toBeNull();
+		expect(promptNodeBefore).not.toBeNull();
+
+		// Server assigns canonical sessionId AND queued prompt start re-keys message.id
+		await renderMessages(
+			[
+				{
+					...optimisticPrompt,
+					id: "queued_user_1",
+					sessionId: "session-created-1",
+				},
+			],
+			{
+				sessionId: "session-created-1",
+				status: "running",
+			},
+		);
+
+		const viewportAfter = container.querySelector<HTMLElement>(
+			'[data-slot="message-scroller-viewport"]',
+		);
+		const promptNodeAfter = container.querySelector<HTMLElement>(
+			'[data-message-id="queued_user_1"]',
+		);
+
+		expect(viewportAfter).toBe(viewportBefore);
+		expect(viewportAfter?.hasAttribute("data-pending-scroll")).toBe(false);
+		expect(promptNodeAfter).toBe(promptNodeBefore);
+		expect(promptNodeAfter?.isConnected).toBe(true);
+	});
+});

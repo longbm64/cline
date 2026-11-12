@@ -3386,18 +3386,39 @@ describe("AgentRuntime", () => {
 			runEndTelemetryProperties: () => ({ maxIdleMs: 42 }),
 		});
 		const eventTypes: string[] = [];
-		runtime.subscribe((event) => eventTypes.push(event.type));
+		const toolCallDeltas: Array<{
+			toolCallId?: string;
+			toolName?: string;
+			inputPreview?: string;
+		}> = [];
+		runtime.subscribe((event) => {
+			eventTypes.push(event.type);
+			if (event.type === "tool-call-delta") {
+				toolCallDeltas.push({
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					inputPreview: event.inputPreview,
+				});
+			}
+		});
 
 		await runtime.run("Hi");
 
-		// Two chunks within a second report progress once.
-		expect(eventTypes.filter((type) => type === "tool-call-delta")).toHaveLength(
-			1,
-		);
+		// Two chunks within a second report progress once, carrying tool identity and preview.
+		expect(
+			eventTypes.filter((type) => type === "tool-call-delta"),
+		).toHaveLength(1);
+		expect(toolCallDeltas).toEqual([
+			{
+				toolCallId: "call-1",
+				toolName: "echo",
+				inputPreview: '{"text":',
+			},
+		]);
 		const events = capture.mock.calls.map(([input]) => input);
-		expect(events.some((input) => input.event === "agent.tool-call-delta")).toBe(
-			false,
-		);
+		expect(
+			events.some((input) => input.event === "agent.tool-call-delta"),
+		).toBe(false);
 		expect(
 			events.find((input) => input.event === "agent.run-finished")?.properties,
 		).toEqual(expect.objectContaining({ maxIdleMs: 42, status: "completed" }));

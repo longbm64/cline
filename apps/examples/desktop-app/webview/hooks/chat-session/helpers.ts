@@ -363,7 +363,14 @@ export function inferHydratedChatStatus(
 		return "cancelled";
 	}
 	const meaningfulMessages = messages.filter((message) => {
-		if (message.role !== "user" && message.role !== "assistant") {
+		if (message.meta?.messageKind === "plugin_issue") {
+			return false;
+		}
+		if (
+			message.role !== "user" &&
+			message.role !== "assistant" &&
+			message.role !== "tool"
+		) {
 			return false;
 		}
 		return message.content.trim().length > 0;

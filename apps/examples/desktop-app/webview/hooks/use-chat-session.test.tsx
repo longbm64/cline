@@ -3883,6 +3883,87 @@ describe("useChatSession", () => {
 		);
 	});
 
+	it("renders attached images on the optimistic user message immediately without waiting for session start", async () => {
+		const originalCreateObjectURL = URL.createObjectURL;
+		const createObjectURL = vi.fn(() => "blob:optimistic-preview");
+		Object.assign(URL, { createObjectURL });
+
+		let resolveStart: ((value: unknown) => void) | undefined;
+		const startResponse = new Promise((resolve) => {
+			resolveStart = resolve;
+		});
+		let plannedSessionId = "";
+
+		invokeMock.mockImplementation(
+			async (command: string, args?: Record<string, unknown>) => {
+				if (command === "get_process_context") {
+					return { cwd: "/workspace/cline", workspaceRoot: "/workspace/cline" };
+				}
+				if (command === "chat_session_command") {
+					const request = args?.request as
+						| { action?: string; config?: { sessionId?: string } }
+						| undefined;
+					if (request?.action === "start") {
+						plannedSessionId = request.config?.sessionId ?? "";
+						return await startResponse;
+					}
+					if (request?.action === "send") {
+						return {
+							ok: true,
+							result: { text: "Done", finishReason: "completed" },
+						};
+					}
+				}
+				return [];
+			},
+		);
+
+		try {
+			const attachment = new File([new Uint8Array([1, 2, 3])], "shot.png", {
+				type: "image/png",
+			});
+
+			let sendPromise: Promise<boolean> | undefined;
+			act(() => {
+				sendPromise = current.sendPrompt("Describe this fast", [attachment]);
+			});
+
+			// Frame 0 (synchronous, before FileReader or session start resolves):
+			// the optimistic user bubble already includes the blob preview URL.
+			const immediateUserMessage = current.messages.find(
+				(message) => message.role === "user",
+			);
+			expect(immediateUserMessage?.images).toEqual([
+				expect.objectContaining({
+					mediaType: "image/png",
+					previewUrl: "blob:optimistic-preview",
+				}),
+			]);
+
+			// Once FileReader finishes (still while session start is pending),
+			// base64 data is also hydrated without waiting on session startup.
+			await act(async () => {
+				await new Promise((resolve) => setTimeout(resolve, 15));
+			});
+			expect(
+				current.messages.find((message) => message.role === "user")?.images,
+			).toEqual([
+				expect.objectContaining({
+					mediaType: "image/png",
+					data: "AQID",
+					previewUrl: "blob:optimistic-preview",
+				}),
+			]);
+
+			await act(async () => {
+				resolveStart?.({ sessionId: plannedSessionId });
+				await sendPromise;
+			});
+		} finally {
+			Object.assign(URL, { createObjectURL: originalCreateObjectURL });
+		}
+	});
+
 	it("keeps distinct image previews for queued prompts with identical text", async () => {
 		invokeMock.mockImplementation(
 			async (command: string, args?: Record<string, unknown>) => {
@@ -7961,5 +8042,265 @@ describe("cloud snapshot replay", () => {
 			await pending;
 		});
 		expect(users.map((m) => m.id)).toEqual(["canonical-first", secondId]);
+	});
+
+	it("surfaces Writing... labels during input_streaming tool deltas and clears on tool_call_start", async () => {
+		const sessionId = "ses-tool-delta";
+		invokeMock.mockImplementation(
+			async (command: string, args?: Record<string, unknown>) => {
+				if (command === "chat_session_command") {
+					const request = args?.request as { action?: string } | undefined;
+					if (request?.action === "start") return { sessionId };
+				}
+				return [];
+			},
+		);
+
+		await act(async () => current.start(current.config));
+		const chatEventHandler = handlerFor("chat_event");
+		const statusHandler = handlerFor("chat_session_status");
+
+		await act(async () => {
+			statusHandler({ sessionId, status: "running" });
+			chatEventHandler({
+				sessionId,
+				stream: "chat_text",
+				chunk: "Updating index.html now.",
+				ts: Date.now(),
+				index: 1,
+			});
+		});
+
+		await act(async () => {
+			chatEventHandler({
+				sessionId,
+				stream: "chat_tool_call_update",
+				chunk: JSON.stringify({
+					toolName: "editor",
+					toolCallId: "call-edit-1",
+					update: { phase: "input_streaming" },
+				}),
+				ts: Date.now(),
+				index: 2,
+			});
+		});
+
+		expect(current.activeAssistantMessageId).toBeNull();
+		expect(
+			current.messages.find((message) => message.role === "assistant")?.content,
+		).toBe("Updating index.html now.");
+		expect(current.streamingToolLabel).toBe("Writing...");
+
+		await act(async () => {
+			chatEventHandler({
+				sessionId,
+				stream: "chat_tool_call_update",
+				chunk: JSON.stringify({
+					toolName: "editor",
+					toolCallId: "call-edit-1",
+					update: {
+						phase: "input_streaming",
+						inputPreview:
+							'{"path":"/Users/app/web/index.html","insert_line":12,"new_text":"<div>',
+					},
+				}),
+				ts: Date.now(),
+				index: 3,
+			});
+		});
+
+		expect(current.streamingToolLabel).toBe(
+			"Inserting into index.html · Writing...",
+		);
+
+		await act(async () => {
+			chatEventHandler({
+				sessionId,
+				stream: "chat_tool_call_start",
+				chunk: JSON.stringify({
+					toolName: "editor",
+					toolCallId: "call-edit-1",
+					input: {
+						path: "/Users/app/web/index.html",
+						insert_line: 12,
+						new_text: "<div>ok</div>",
+					},
+				}),
+				ts: Date.now(),
+				index: 4,
+			});
+		});
+
+		expect(current.streamingToolLabel).toBeNull();
+	});
+
+	it("keeps Turn 2 messages visible when read_session_messages lags with Turn 1 history and heals on retry", async () => {
+		await act(async () => root.render(null));
+		subscribeMock.mockClear();
+		await act(async () => root.render(<HookHarness />));
+		vi.useFakeTimers();
+		try {
+			const sessionId = "ses-turn2-lag";
+			let readAttempt = 0;
+			const turn1History = [
+				{
+					id: "hist_u1",
+					sessionId,
+					role: "user" as const,
+					content: "First prompt",
+					createdAt: 1,
+					meta: { runCount: 1 },
+				},
+				{
+					id: "hist_a1",
+					sessionId,
+					role: "assistant" as const,
+					content: "First reply",
+					createdAt: 2,
+					meta: { runCount: 1 },
+				},
+			];
+			const turn2History = [
+				...turn1History,
+				{
+					id: "hist_u2",
+					sessionId,
+					role: "user" as const,
+					content: "Second prompt",
+					createdAt: 3,
+					meta: { runCount: 2 },
+				},
+				{
+					id: "hist_a2",
+					sessionId,
+					role: "assistant" as const,
+					content: "Second reply canonical",
+					createdAt: 4,
+					meta: { runCount: 2 },
+				},
+			];
+
+			let hydrated = false;
+			invokeMock.mockImplementation(
+				async (command: string, args?: Record<string, unknown>) => {
+					if (command === "get_process_context") {
+						return { cwd: "/workspace/cline", workspaceRoot: "/workspace/cline" };
+					}
+					if (command === "read_session_messages") {
+						if (!hydrated) {
+							hydrated = true;
+							return turn1History;
+						}
+						readAttempt += 1;
+						return readAttempt === 1 ? turn1History : turn2History;
+					}
+					if (command === "chat_session_command") {
+						const request = args?.request as { action?: string } | undefined;
+						if (request?.action === "start" || request?.action === "attach") {
+							return {
+								sessionId,
+								status: "completed",
+								provider: "cline",
+								model: "test-model",
+								cwd: "/workspace/cline",
+								workspaceRoot: "/workspace/cline",
+							};
+						}
+						if (request?.action === "send") {
+							return {
+								ok: true,
+								queued: true,
+								promptsInQueue: [{ id: "q_2", text: "Second prompt" }],
+							};
+						}
+					}
+					return [];
+				},
+			);
+
+			await act(async () => {
+				await current.hydrateSession({
+					environmentId: "local",
+					sessionId,
+					status: "completed",
+					provider: "cline",
+					model: "test-model",
+					cwd: "/workspace/cline",
+					workspaceRoot: "/workspace/cline",
+					startedAt: "2026-08-12T00:00:00.000Z",
+				});
+			});
+			expect(current.messages.map((m) => m.content)).toEqual([
+				"First prompt",
+				"First reply",
+			]);
+
+			const chatEventHandler = handlerFor("chat_event");
+
+			await act(async () => {
+				await current.sendPrompt("Second prompt");
+			});
+			const optimisticTurn2User = current.messages[2];
+			expect(optimisticTurn2User?.content).toBe("Second prompt");
+			const initialTurn2RenderKey =
+				optimisticTurn2User?.meta?.clientRenderKey ?? optimisticTurn2User?.id;
+
+			await act(async () => {
+				chatEventHandler({
+					sessionId,
+					stream: "chat_queued_prompt_start",
+					chunk: JSON.stringify({ promptId: "q_2", prompt: "Second prompt" }),
+					ts: 10,
+					index: 1,
+				});
+				chatEventHandler({
+					sessionId,
+					stream: "chat_text",
+					chunk: "Second reply live",
+					ts: 11,
+					index: 2,
+				});
+				chatEventHandler({
+					sessionId,
+					stream: "chat_done",
+					chunk: JSON.stringify({ finishReason: "completed" }),
+					ts: 12,
+					index: 3,
+				});
+			});
+
+			// First reconcile attempt returns stale Turn 1 history: Turn 2 must NOT disappear
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(300);
+			});
+			expect(readAttempt).toBe(1);
+			expect(current.messages.map((m) => m.content)).toEqual([
+				"First prompt",
+				"First reply",
+				"Second prompt",
+				"Second reply live",
+			]);
+			expect(current.messages[2]?.meta?.clientRenderKey).toBe(
+				initialTurn2RenderKey,
+			);
+
+			// Bounded retry sees flushed Turn 2 history and reconciles while keeping clientRenderKey
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(650);
+			});
+			expect(readAttempt).toBe(2);
+			expect(current.messages.map((m) => m.content)).toEqual([
+				"First prompt",
+				"First reply",
+				"Second prompt",
+				"Second reply canonical",
+			]);
+			expect(current.messages[2]?.id).toBe("hist_u2");
+			expect(current.messages[2]?.meta?.clientRenderKey).toBe(
+				initialTurn2RenderKey,
+			);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

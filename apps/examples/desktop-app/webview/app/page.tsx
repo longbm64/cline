@@ -52,6 +52,7 @@ import {
 } from "@/components/views/chat/cloud-handoff";
 import { EnvironmentSelector } from "@/components/views/chat/environment-selector";
 import { RemoteDirectoryPicker } from "@/components/views/chat/remote-directory-picker";
+import { SubagentColumnsView } from "@/components/views/chat/subagent-columns-view";
 import { WelcomeScreen } from "@/components/views/chat/welcome-chat";
 import { WelcomeSetupNotice } from "@/components/views/chat/welcome-setup-notice";
 import type { OnboardingStep } from "@/components/views/onboarding/onboarding-view";
@@ -75,11 +76,13 @@ import {
 } from "@/hooks/chat-session/constants";
 import { checkForUpdateAndNotify, useAppUpdate } from "@/hooks/use-app-update";
 import { useChatSession } from "@/hooks/use-chat-session";
+import { useComposerAttachments } from "@/hooks/use-composer-attachments";
 import { useHubStartup } from "@/hooks/use-hub-startup";
 import { PromptDraftCache, usePromptDraft } from "@/hooks/use-prompt-draft";
 import { useRemoteEnvironmentBootstrap } from "@/hooks/use-remote-environment-bootstrap";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { useSessionHistory } from "@/hooks/use-session-history";
+import { useSubagentStreams } from "@/hooks/use-subagent-streams";
 import { toast } from "@/hooks/use-toast";
 import { applyAppZoomAction, syncAppFontSize } from "@/lib/app-font-size";
 import { syncAppIcon } from "@/lib/app-icon";
@@ -128,7 +131,6 @@ import {
 import { syncDesktopWindowTitle } from "@/lib/desktop-window-title";
 import {
 	cloudImageAttachmentError,
-	imageAttachmentMediaType,
 	isSupportedImageAttachment,
 	isUnsupportedImageAttachment,
 } from "@/lib/image-attachments";
@@ -161,7 +163,9 @@ import type {
 } from "@/lib/remote-environments";
 import {
 	buildSessionAgentActivity,
+	EMPTY_AGENT_ACTIVITY,
 	mergeAgentActivity,
+	type SessionAgentActivity,
 } from "@/lib/session-agents";
 import {
 	type ChangesScope,
@@ -190,6 +194,7 @@ import {
 	pendingWhatsNew,
 } from "@/lib/whats-new";
 import type { WhatsNewRelease } from "@/lib/whats-new-content";
+import { isAppWindowFocused } from "@/lib/window-focus";
 import {
 	readWorkInFromWindow,
 	startsNewThread,
@@ -1641,6 +1646,7 @@ function ChatThreadPane({
 		isCloudSessionExpired,
 		activeAssistantMessageId,
 		activityLabel,
+		streamingToolLabel,
 		isCompacting,
 		config,
 		messages,
@@ -2299,8 +2305,13 @@ function ChatThreadPane({
 				void refreshGitBranch();
 			}
 		};
+		const refreshFocusedBranch = () => {
+			if (document.visibilityState === "visible" && isAppWindowFocused()) {
+				void refreshGitBranch();
+			}
+		};
 		const intervalId = window.setInterval(
-			refreshVisibleBranch,
+			refreshFocusedBranch,
 			environmentId === LOCAL_WORKSPACE_ENVIRONMENT_ID
 				? GIT_BRANCH_REFRESH_INTERVAL_MS
 				: REMOTE_GIT_BRANCH_REFRESH_INTERVAL_MS,
@@ -2821,7 +2832,7 @@ function ChatThreadPane({
 						userFiles: removed.userFiles,
 					});
 			const cleanPrompt = formatDisplayUserInput(removed.prompt);
-			const parsedPromptMode = /<user_input[^>]*mode="(act|plan)"/.exec(
+			const parsedPromptMode = /<user_input\b[^>]*\bmode="(act|plan)"/.exec(
 				removed.prompt,
 			)?.[1] as "act" | "plan" | undefined;
 			const effectiveMode = parsedPromptMode ?? config.mode;
@@ -3131,15 +3142,7 @@ function ChatThreadPane({
 		[setConfig],
 	);
 
-	const attachmentList = useMemo(
-		() =>
-			pendingAttachments.map((file, index) => ({
-				id: `${file.name}:${file.size}:${file.lastModified}:${index}`,
-				name: file.name,
-				isImage: imageAttachmentMediaType(file) !== undefined,
-			})),
-		[pendingAttachments],
-	);
+	const attachmentList = useComposerAttachments(pendingAttachments);
 	const handleRemoveAttachment = useCallback(
 		(id: string) => {
 			setPendingAttachments((prev) =>
@@ -3281,23 +3284,150 @@ function ChatThreadPane({
 	// the agents of exactly the long sessions this is most useful for. Opening the
 	// panel re-reads; polling is what the active check gates.
 	const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+	const [subagentColumnsOpen, setSubagentColumnsOpen] = useState(false);
 	const {
 		agents,
 		loading: agentsLoading,
 		error: agentsError,
+		refresh: refreshSessionAgents,
 	} = useSessionAgents({
 		environmentId,
 		sessionId: isCloudSession ? null : displayedSessionId,
-		panelOpen: agentPanelOpen,
+		panelOpen: agentPanelOpen || subagentColumnsOpen,
 		sessionActive: isSessionActive,
 	});
-	const agentActivity = useMemo(
+	const handleAgentLifecycleChange = useCallback(() => {
+		if (displayedSessionId && !isCloudSession) {
+			void refreshSessionAgents(displayedSessionId, { quiet: true });
+		}
+	}, [displayedSessionId, isCloudSession, refreshSessionAgents]);
+	const { columns: subagentColumns, liveRunningCount } = useSubagentStreams({
+		environmentId,
+		sessionId: isCloudSession ? null : displayedSessionId,
+		sessionActive: isSessionActive,
+		agents,
+		parentMessages: showingHistoryPreview ? [] : displayedMessages,
+		enabled:
+			!isCloudSession && Boolean(displayedSessionId) && subagentColumnsOpen,
+		onAgentLifecycleChange: handleAgentLifecycleChange,
+	});
+	const derivedAgentSyncKey = `${derivedAgentActivity.total}:${derivedAgentActivity.running}`;
+	useEffect(() => {
+		if (
+			!displayedSessionId ||
+			isCloudSession ||
+			derivedAgentSyncKey === "0:0"
+		) {
+			return;
+		}
+		void refreshSessionAgents(displayedSessionId, { quiet: true });
+	}, [
+		derivedAgentSyncKey,
+		displayedSessionId,
+		isCloudSession,
+		refreshSessionAgents,
+	]);
+	const rawAgentActivity = useMemo(
 		() =>
 			mergeAgentActivity(agents, derivedAgentActivity, {
 				sessionActive: isSessionActive,
 			}),
 		[agents, derivedAgentActivity, isSessionActive],
 	);
+	const agentActivity = useMemo<SessionAgentActivity>(() => {
+		if (
+			subagentColumns.length === 0 ||
+			subagentColumns.length < rawAgentActivity.total
+		) {
+			return rawAgentActivity;
+		}
+		const liveSummary: SessionAgentActivity = {
+			...EMPTY_AGENT_ACTIVITY,
+			total: subagentColumns.length,
+		};
+		for (const col of subagentColumns) {
+			liveSummary[col.state] += 1;
+		}
+		return liveSummary;
+	}, [rawAgentActivity, subagentColumns]);
+
+	// Auto-open parallel columns while subagents are running, and automatically
+	// return to Main Agent chat once the running batch finishes so the user sees
+	// the synthesized final response without having to click back manually.
+	const subagentAutoStateRef = useRef<{
+		sessionId: string | null;
+		hadRunningBatch: boolean;
+		dismissedCurrentBatch: boolean;
+	}>({
+		sessionId: null,
+		hadRunningBatch: false,
+		dismissedCurrentBatch: false,
+	});
+	useEffect(() => {
+		const autoState = subagentAutoStateRef.current;
+		const sessionChanged = autoState.sessionId !== displayedSessionId;
+		if (sessionChanged) {
+			autoState.sessionId = displayedSessionId;
+			autoState.hadRunningBatch = false;
+			autoState.dismissedCurrentBatch = false;
+		}
+		if (isCloudSession || !displayedSessionId) {
+			setSubagentColumnsOpen(false);
+			return;
+		}
+		const hasActiveTurnSubagents =
+			derivedAgentActivity.running > 0 || liveRunningCount > 0;
+		if (isSessionActive && hasActiveTurnSubagents) {
+			autoState.hadRunningBatch = true;
+			if (!autoState.dismissedCurrentBatch) {
+				setSubagentColumnsOpen(true);
+			}
+			return;
+		}
+		if (
+			autoState.hadRunningBatch &&
+			agentActivity.running === 0 &&
+			liveRunningCount === 0
+		) {
+			autoState.hadRunningBatch = false;
+			autoState.dismissedCurrentBatch = false;
+			setSubagentColumnsOpen(false);
+			return;
+		}
+		if (sessionChanged) {
+			setSubagentColumnsOpen(false);
+		}
+	}, [
+		agentActivity.running,
+		derivedAgentActivity.running,
+		displayedSessionId,
+		isCloudSession,
+		isSessionActive,
+		liveRunningCount,
+	]);
+
+	const closeSubagentColumns = useCallback(() => {
+		if (agentActivity.running > 0) {
+			subagentAutoStateRef.current.dismissedCurrentBatch = true;
+		}
+		setSubagentColumnsOpen(false);
+	}, [agentActivity.running]);
+
+	const toggleSubagentColumns = useCallback(() => {
+		setSubagentColumnsOpen((prev) => {
+			const next = !prev;
+			if (agentActivity.running > 0) {
+				subagentAutoStateRef.current.dismissedCurrentBatch = !next;
+			}
+			return next;
+		});
+	}, [agentActivity.running]);
+
+	const showSubagentColumns =
+		!isWelcomeState &&
+		!isCloudSession &&
+		subagentColumnsOpen &&
+		(agentActivity.total > 0 || subagentColumns.length > 0);
 	// A child agent has its own session row, so opening it goes through the same
 	// path as any other session — it is just never listed in the sidebar.
 	const onOpenAgentSession = useCallback(
@@ -3553,6 +3683,10 @@ function ChatThreadPane({
 								onAgentsOpenChange={setAgentPanelOpen}
 								onOpenAgentSession={onOpenAgentSession}
 								onOpenParentSession={onOpenAgentSession}
+								subagentColumnsOpen={showSubagentColumns}
+								onToggleSubagentColumns={
+									isCloudSession ? undefined : toggleSubagentColumns
+								}
 								parentSession={hideDeletedSessionUi ? undefined : parentSession}
 								canEditTitle={
 									Boolean(activeSessionForTitle) && !isProvisioningCloudSession
@@ -3590,6 +3724,22 @@ function ChatThreadPane({
 						displayedMessages.length === 0 ? (
 							// Keep opening an existing cloud session visually continuous.
 							<CloudProvisioningPane phase="Opening session..." />
+						) : showSubagentColumns ? (
+							<SubagentColumnsView
+								activity={agentActivity}
+								chatTransportState={chatTransportState}
+								columns={subagentColumns}
+								onAnswerAskQuestion={handleAnswerAskQuestion}
+								onApproveToolApproval={handleApproveToolApproval}
+								onBackToMainChat={closeSubagentColumns}
+								onOpenAgentSession={onOpenAgentSession}
+								onProceedWhileRunning={
+									isCloudSession ? undefined : proceedWhileRunning
+								}
+								onRejectToolApproval={handleRejectToolApproval}
+								pendingAskQuestions={pendingAskQuestions}
+								pendingToolApprovals={pendingToolApprovals}
+							/>
 						) : (
 							<ChatMessages
 								onAnswerAskQuestion={handleAnswerAskQuestion}
@@ -3597,6 +3747,7 @@ function ChatThreadPane({
 								onRejectToolApproval={handleRejectToolApproval}
 								chatTransportState={chatTransportState}
 								activityLabel={activityLabel}
+								streamingToolLabel={streamingToolLabel}
 								error={cloudSessionError?.message ?? displayedError}
 								errorAction={
 									cloudConnectUrl

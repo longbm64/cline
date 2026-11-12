@@ -291,6 +291,42 @@ describe("inferHydratedChatStatus", () => {
 			]),
 		).toBe("completed");
 	});
+
+	it("keeps running status when tool calls follow assistant narration", () => {
+		expect(
+			inferHydratedChatStatus("running", [
+				{
+					id: "u",
+					sessionId: "s",
+					role: "user",
+					content: "update index.html",
+					createdAt: 1,
+				},
+				{
+					id: "a",
+					sessionId: "s",
+					role: "assistant",
+					content: "I will insert the counter into index.html.",
+					createdAt: 2,
+				},
+				{
+					id: "t",
+					sessionId: "s",
+					role: "tool",
+					content: JSON.stringify({
+						toolName: "editor",
+						input: {
+							path: "/Users/app/web/index.html",
+							insert_line: 10,
+							new_text: "setElText('stat-saved-tokens', '0');",
+						},
+						result: "ok",
+					}),
+					createdAt: 3,
+				},
+			]),
+		).toBe("running");
+	});
 });
 
 describe("extractAssistantTurnDataFromRpcMessages", () => {

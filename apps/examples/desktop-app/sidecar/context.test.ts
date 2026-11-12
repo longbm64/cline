@@ -2116,4 +2116,119 @@ describe("Chat chunk pipe selection", () => {
 		const second = createSidecarContext("/workspace/project");
 		expect(second.bootId).not.toBe(first.bootId);
 	});
+
+	it("routes subagent and teammate events to subagent_chat_event without ending parent session", async () => {
+		const {
+			handleCoreSessionEvent,
+			handleHubLiveEvent,
+			readSubagentLiveStreams,
+		} = await import("./context");
+		const ctx = await createStreamingContext("session-1");
+
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: {
+					type: "content_start",
+					contentType: "text",
+					text: "sub-1 working",
+					agentId: "agent-sub-1",
+					parentAgentId: "agent-root",
+				} as never,
+			},
+		});
+
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				teamRole: "teammate",
+				teamAgentId: "reviewer",
+				event: {
+					type: "content_start",
+					contentType: "text",
+					text: "teammate checking",
+					agentId: "agent-team-raw",
+				} as never,
+			},
+		});
+
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: {
+					type: "done",
+					reason: "completed",
+					text: "sub-1 done",
+					iterations: 2,
+					usage: { inputTokens: 10, outputTokens: 5 },
+					agentId: "agent-sub-1",
+					parentAgentId: "agent-root",
+				} as never,
+			},
+		});
+
+		handleHubLiveEvent(ctx, {
+			event: "assistant.delta",
+			sessionId: "session-1",
+			payload: {
+				text: "sub-2 observer",
+				agent: {
+					kind: "subagent",
+					agentId: "agent-sub-2",
+					parentAgentId: "agent-root",
+				},
+			},
+		});
+
+		// Parent session stream stays clean and busy stays true while parent runs
+		expect(chunksFor(ctx, "chat_text")).toEqual([]);
+		expect(ctx.liveSessions.get("session-1")?.busy).toBe(true);
+
+		const subagentEvents = eventsFor(ctx, "subagent_chat_event") as Array<{
+			agentId: string;
+			kind: string;
+			stream: string;
+			chunk: string;
+			index: number;
+		}>;
+		expect(subagentEvents).toHaveLength(4);
+		expect(subagentEvents[0]).toMatchObject({
+			agentId: "agent-sub-1",
+			kind: "subagent",
+			stream: "chat_text",
+			chunk: "sub-1 working",
+			index: 1,
+		});
+		expect(subagentEvents[1]).toMatchObject({
+			agentId: "reviewer",
+			kind: "teamtask",
+			stream: "chat_text",
+			chunk: "teammate checking",
+			index: 1,
+		});
+		expect(subagentEvents[2]).toMatchObject({
+			agentId: "agent-sub-1",
+			kind: "subagent",
+			stream: "chat_done",
+			index: 2,
+		});
+		expect(subagentEvents[3]).toMatchObject({
+			agentId: "agent-sub-2",
+			kind: "subagent",
+			stream: "chat_text",
+			chunk: "sub-2 observer",
+			index: 1,
+		});
+
+		const buffered = readSubagentLiveStreams(ctx, "session-1");
+		expect(Object.keys(buffered).sort()).toEqual([
+			"agent-sub-1",
+			"agent-sub-2",
+			"reviewer",
+		]);
+		expect(buffered["agent-sub-1"]).toHaveLength(2);
+	});
 });

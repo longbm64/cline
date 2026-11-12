@@ -612,3 +612,96 @@ describe("AgentHeader subagent session badge", () => {
 		);
 	});
 });
+
+describe("AgentHeader parallel subagent columns toggle", () => {
+	const ACTIVITY = {
+		total: 4,
+		running: 4,
+		completed: 0,
+		failed: 0,
+		cancelled: 0,
+		unresolved: 0,
+	};
+
+	it("stays hidden when there are no agents or no toggle handler", async () => {
+		await act(async () => {
+			root.render(
+				<AgentHeader
+					onToggleSubagentColumns={vi.fn()}
+					status="running"
+					title="S"
+				/>,
+			);
+		});
+		expect(container.querySelector("#toggle-subagent-columns")).toBeNull();
+
+		await act(async () => {
+			root.render(
+				<AgentHeader agentActivity={ACTIVITY} status="running" title="S" />,
+			);
+		});
+		expect(container.querySelector("#toggle-subagent-columns")).toBeNull();
+	});
+
+	it("reflects open state and invokes onToggleSubagentColumns from both toolbar and roster popover", async () => {
+		const onToggleSubagentColumns = vi.fn();
+		await act(async () => {
+			root.render(
+				<AgentHeader
+					agentActivity={ACTIVITY}
+					onToggleSubagentColumns={onToggleSubagentColumns}
+					status="running"
+					subagentColumnsOpen={false}
+					title="S"
+				/>,
+			);
+		});
+
+		const toolbarBtn = container.querySelector<HTMLButtonElement>(
+			"#toggle-subagent-columns",
+		);
+		expect(toolbarBtn).not.toBeNull();
+		expect(toolbarBtn?.getAttribute("aria-pressed")).toBe("false");
+		expect(toolbarBtn?.getAttribute("aria-label")).toBe(
+			"View parallel agent columns",
+		);
+
+		await act(async () => {
+			toolbarBtn?.click();
+		});
+		expect(onToggleSubagentColumns).toHaveBeenCalledTimes(1);
+
+		// Open roster popover and trigger from inside the popover header
+		await act(async () => {
+			root.render(
+				<AgentHeader
+					agentActivity={ACTIVITY}
+					onToggleSubagentColumns={onToggleSubagentColumns}
+					status="running"
+					subagentColumnsOpen
+					title="S"
+				/>,
+			);
+		});
+		expect(
+			container
+				.querySelector("#toggle-subagent-columns")
+				?.getAttribute("aria-pressed"),
+		).toBe("true");
+
+		const activityTrigger =
+			container.querySelector<HTMLButtonElement>("#agent-activity");
+		await act(async () => {
+			activityTrigger?.click();
+		});
+		const panelToggle = document.querySelector<HTMLButtonElement>(
+			"#agent-panel-toggle-columns",
+		);
+		expect(panelToggle?.textContent).toContain("Main chat");
+		await act(async () => {
+			panelToggle?.click();
+		});
+		expect(onToggleSubagentColumns).toHaveBeenCalledTimes(2);
+		expect(document.querySelector("#agent-activity-panel")).toBeNull();
+	});
+});

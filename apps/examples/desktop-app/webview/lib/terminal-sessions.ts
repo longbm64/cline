@@ -111,6 +111,15 @@ function resolveCssColor(value: string, fallback: string): string {
 		: fallback;
 }
 
+function hexWithAlpha(hex: string, alpha: number): string | null {
+	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+	if (!match) return null;
+	const r = Number.parseInt(match[1], 16);
+	const g = Number.parseInt(match[2], 16);
+	const b = Number.parseInt(match[3], 16);
+	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export function readTerminalTheme(): ITheme {
 	const styles = getComputedStyle(document.documentElement);
 	const dark = document.documentElement.classList.contains("dark");
@@ -135,9 +144,9 @@ export function readTerminalTheme(): ITheme {
 		foreground,
 		cursor: primary,
 		cursorAccent: dark ? "#000000" : "#ffffff",
-		selectionBackground: dark
-			? "rgba(167, 139, 250, 0.35)"
-			: "rgba(124, 58, 237, 0.25)",
+		selectionBackground:
+			hexWithAlpha(primary, dark ? 0.32 : 0.22) ??
+			(dark ? "rgba(167, 139, 250, 0.35)" : "rgba(124, 58, 237, 0.25)"),
 		brightBlack: muted,
 		// The stock dark palette's yellow and cyan wash out on a light surface.
 		...(dark

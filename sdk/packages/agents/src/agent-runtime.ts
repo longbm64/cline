@@ -1954,10 +1954,24 @@ export class AgentRuntime {
 					// thousands of argument chunks.
 					if (Date.now() - lastToolCallDeltaAt >= 1_000) {
 						lastToolCallDeltaAt = Date.now();
+						const rawPreview =
+							assembly.inputText ||
+							(assembly.inputValue !== undefined
+								? (() => {
+										try {
+											return JSON.stringify(assembly.inputValue);
+										} catch {
+											return "";
+										}
+									})()
+								: "");
 						await this.emit({
 							type: "tool-call-delta",
 							snapshot: this.snapshot(),
 							iteration: this.state.iteration,
+							toolCallId: assembly.toolCallId,
+							...(assembly.toolName ? { toolName: assembly.toolName } : {}),
+							...(rawPreview ? { inputPreview: rawPreview.slice(0, 512) } : {}),
 						});
 					}
 					break;

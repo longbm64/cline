@@ -936,3 +936,166 @@ export function buildGroupedToolLabel(
 		})
 		.join(" · ");
 }
+
+function extractCompletedJsonStringField(
+	preview: string,
+	keys: readonly string[],
+): string | undefined {
+	if (!preview) return undefined;
+	for (const key of keys) {
+		const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])+)"`);
+		const match = pattern.exec(preview);
+		if (!match?.[1]) continue;
+		let decoded = match[1];
+		try {
+			decoded = JSON.parse(`"${match[1]}"`) as string;
+		} catch {
+			// Keep raw capture when an escape sequence is non-standard.
+		}
+		const trimmed = decoded.trim();
+		if (trimmed) return trimmed;
+	}
+	return undefined;
+}
+
+function decodeStreamingPatchText(preview: string): string {
+	if (!preview.trimStart().startsWith("{")) {
+		return preview;
+	}
+	return preview
+		.replace(/\\r\\n/g, "\n")
+		.replace(/\\n/g, "\n")
+		.replace(/\\r/g, "\r")
+		.replace(/\\t/g, "\t")
+		.replace(/\\"/g, '"')
+		.replace(/\\\\/g, "\\");
+}
+
+/**
+ * Describe a tool call whose arguments are still streaming from the model
+ * (`tool-call-delta`, before `tool_call_start`).
+ *
+ * File edits and inserts spend almost their entire wall-clock duration
+ * streaming `new_text` / patch hunks rather than executing on disk, so this
+ * surfaces live `"Writing..."` feedback from a short prefix of the raw stream
+ * without flashing half-streamed filenames.
+ */
+export function describeStreamingToolCall(
+	toolName: string,
+	inputPreview?: string,
+): string {
+	const normalized = normalizeToolName(toolName || "tool");
+	const kind = classifyTool(normalized);
+	const preview = typeof inputPreview === "string" ? inputPreview : "";
+
+	if (normalized === "editor") {
+		const rawPath = extractCompletedJsonStringField(preview, [
+			"path",
+			"file_path",
+			"filepath",
+		]);
+		const fileName = rawPath ? displayFileName(rawPath) : undefined;
+		const command = extractCompletedJsonStringField(preview, ["command"]);
+		const hasInsertLine = /"insert_line"\s*:\s*-?\d+/.test(preview);
+		const hasOldTextString = /"old_text"\s*:\s*"/.test(preview);
+		const hasExplicitNullOldText = /"old_text"\s*:\s*null\b/.test(preview);
+		const hasExplicitNullInsertLine = /"insert_line"\s*:\s*null\b/.test(
+			preview,
+		);
+
+		if (command === "insert" || hasInsertLine) {
+			return fileName
+				? `Inserting into ${fileName} · Writing...`
+				: "Inserting into file · Writing...";
+		}
+		if (
+			command === "create" ||
+			(hasExplicitNullOldText && hasExplicitNullInsertLine)
+		) {
+			return fileName
+				? `Creating file ${fileName} · Writing...`
+				: "Creating file · Writing...";
+		}
+		if (command === "str_replace" || hasOldTextString) {
+			return fileName
+				? `Editing file ${fileName} · Writing...`
+				: "Editing file · Writing...";
+		}
+		return fileName ? `Writing ${fileName}...` : "Writing...";
+	}
+
+	if (normalized === "apply_patch") {
+		const patchText = decodeStreamingPatchText(preview);
+		const headerMatch =
+			/^\*\*\* (Add|Update|Delete) File:\s*([^\r\n]+)\r?\n/m.exec(patchText);
+		if (headerMatch) {
+			const action = headerMatch[1];
+			const rawPath = headerMatch[2]?.trim() ?? "";
+			const fileName = rawPath ? displayFileName(rawPath) : undefined;
+			if (action === "Add") {
+				return fileName
+					? `Creating file ${fileName} · Writing...`
+					: "Creating file · Writing...";
+			}
+			if (action === "Delete") {
+				return fileName ? `Deleting file ${fileName}...` : "Deleting file...";
+			}
+			return fileName
+				? `Editing file ${fileName} · Writing...`
+				: "Editing file · Writing...";
+		}
+		return "Writing...";
+	}
+
+	if (kind === "edit") {
+		const rawPath = extractCompletedJsonStringField(preview, [
+			"path",
+			"file_path",
+			"filepath",
+			"target_file",
+		]);
+		const fileName = rawPath ? displayFileName(rawPath) : undefined;
+		return fileName ? `Writing ${fileName}...` : "Writing...";
+	}
+
+	if (kind === "read") {
+		const rawPath = extractCompletedJsonStringField(preview, [
+			"path",
+			"file_path",
+			"filepath",
+		]);
+		const fileName = rawPath ? displayFileName(rawPath) : undefined;
+		return fileName ? `Reading file ${fileName}...` : "Reading file...";
+	}
+
+	if (kind === "command") {
+		const command = extractCompletedJsonStringField(preview, [
+			"command",
+			"cmd",
+		]);
+		return command
+			? `Running command ${truncate(command, 80)}`
+			: "Running command...";
+	}
+
+	if (kind === "search") {
+		const query = extractCompletedJsonStringField(preview, [
+			"query",
+			"pattern",
+			"regex",
+		]);
+		return query ? `Searching ${truncate(query, 80)}` : "Searching...";
+	}
+
+	if (kind === "web") {
+		const url = extractCompletedJsonStringField(preview, ["url"]);
+		return url ? `Fetching ${truncate(url, 80)}` : "Fetching web content...";
+	}
+
+	if (kind === "skill") {
+		const skill = extractCompletedJsonStringField(preview, ["skill", "name"]);
+		return skill ? `Using skill ${truncate(skill, 60)}...` : "Using skill...";
+	}
+
+	return `${fallbackLabel(kind, normalized, true)}...`;
+}

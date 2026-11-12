@@ -171,6 +171,21 @@ describe("MessageScroller turn identity", () => {
 		await renderRows([...history, "user-confirmed", "answer-new", "user-next"]);
 		expect(viewport().scrollTop).toBe(2312);
 	});
+
+	it("avoids O(N) layout scans on every scroll event in long transcripts", async () => {
+		const manyRows = Array.from({ length: 200 }, (_, index) =>
+			index % 2 === 0 ? `user-${index}` : `answer-${index}`,
+		);
+		await renderRows(manyRows);
+		const rectSpy = vi.mocked(HTMLElement.prototype.getBoundingClientRect);
+		rectSpy.mockClear();
+
+		await readAt(76_000);
+
+		// Binary search in We() (~8 reads) + tail scan in Re() (<=4 reads) +
+		// viewport rect reads stays well below linear 2 * 200 = 400 reads.
+		expect(rectSpy.mock.calls.length).toBeLessThan(30);
+	});
 });
 
 describe("MessageScrollerButton", () => {

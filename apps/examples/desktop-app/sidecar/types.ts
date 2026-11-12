@@ -65,6 +65,16 @@ export type PromptInQueue = {
 	userFiles?: Array<{ name: string; content: string }>;
 };
 
+export type SubagentLiveChunk = {
+	agentId: string;
+	parentAgentId?: string;
+	kind: "subagent" | "teamtask";
+	stream: string;
+	chunk: string;
+	ts: number;
+	index: number;
+};
+
 export type LiveSession = {
 	environmentId?: string;
 	config: JsonRecord;
@@ -91,6 +101,8 @@ export type LiveSession = {
 	lastQueuedPromptStartId?: string;
 	/** Materialized attachment files whose prompt was submitted; deleted when the turn ends. */
 	consumedAttachmentFiles?: Map<string, string[]>;
+	/** Bounded in-memory live chunks per child agent so re-opening a running session replays progress. */
+	subagentStreams?: Map<string, SubagentLiveChunk[]>;
 };
 
 export type SessionRuntimeBinding = {

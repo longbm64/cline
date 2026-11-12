@@ -1,11 +1,11 @@
 "use client";
 
+import { isChatWorkspacePath } from "@cline/shared/browser";
 import {
 	AgentSessionOverview,
 	AgentSessionRow,
 	AgentSessionRowEditor,
 } from "@cline/ui";
-
 import {
 	ArrowLeft,
 	ArrowRight,
@@ -49,6 +49,7 @@ import {
 } from "react";
 import { AppUpdateIndicator } from "@/components/app-update-indicator";
 import { ClineLogo } from "@/components/cline-logo";
+import { ThemeSwitcherMenu } from "@/components/theme-switcher-menu";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -107,7 +108,6 @@ import {
 	isBetaVersion,
 	productNameForVersion,
 } from "@/lib/app-channel";
-import { isChatWorkspacePath } from "@cline/shared/browser";
 import { desktopClient, isTauriAvailable } from "@/lib/desktop-client";
 import { formatAccelerator, useKeybindings } from "@/lib/keybindings";
 import {
@@ -1403,7 +1403,7 @@ export function AgentSidebar({
 					)}
 				>
 					{user && !isCollapsed ? (
-						<div className="flex min-w-0 items-center gap-2">
+						<div className="flex min-w-0 items-center gap-1.5">
 							<button
 								aria-label="Account settings"
 								className={cn(
@@ -1430,6 +1430,7 @@ export function AgentSidebar({
 									) : null}
 								</span>
 							</button>
+							<ThemeSwitcherMenu align="end" />
 							<Button
 								aria-label="Settings"
 								className={cn(
@@ -1446,23 +1447,43 @@ export function AgentSidebar({
 								<Settings className="size-4" />
 							</Button>
 						</div>
+					) : isCollapsed ? (
+						<div className="flex flex-col items-center gap-1">
+							<ThemeSwitcherMenu align="start" />
+							<Button
+								aria-label="Settings"
+								className={cn(
+									"size-9 justify-center px-0",
+									view === "settings" &&
+										"bg-surface-hover text-sidebar-foreground",
+								)}
+								onClick={openSettings}
+								title="Settings"
+								type="button"
+								variant="sidebarItem"
+							>
+								<Settings className="size-4" />
+							</Button>
+						</div>
 					) : (
-						<Button
-							aria-label="Settings"
-							className={cn(
-								"min-w-0 justify-start",
-								isCollapsed && "size-9 justify-center px-0",
-								view === "settings" &&
-									"bg-surface-hover text-sidebar-foreground",
-							)}
-							onClick={openSettings}
-							title="Settings"
-							type="button"
-							variant="sidebarItem"
-						>
-							<Settings className="size-4" />
-							{!isCollapsed ? "Settings" : null}
-						</Button>
+						<div className="flex min-w-0 items-center gap-1.5">
+							<Button
+								aria-label="Settings"
+								className={cn(
+									"min-w-0 flex-1 justify-start",
+									view === "settings" &&
+										"bg-surface-hover text-sidebar-foreground",
+								)}
+								onClick={openSettings}
+								title="Settings"
+								type="button"
+								variant="sidebarItem"
+							>
+								<Settings className="size-4" />
+								Settings
+							</Button>
+							<ThemeSwitcherMenu align="end" />
+						</div>
 					)}
 				</div>
 			</div>

@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
-import { deserializeAttachments, serializeAttachments } from "./attachments";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	deserializeAttachments,
+	evictCachedImagePreviewUrl,
+	resolveChatMessageImageSrc,
+	serializeAttachments,
+	toChatMessageImages,
+	toOptimisticChatMessageImages,
+	warmAttachmentFiles,
+} from "./attachments";
 
 // Minimal valid 1x1 PNG bytes so validateImageMedia accepts the image payload.
 const ONE_BY_ONE_PNG_BASE64 =
@@ -17,6 +25,10 @@ function makePngFile(name: string): File {
 }
 
 describe("attachments serialization round-trip", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("reconstructs image and text File attachments from queued prompt payloads", async () => {
 		const imageFile = makePngFile("screenshot.png");
 		const textFile = new File(["line 1\nline 2"], "notes.md", {
@@ -36,5 +48,76 @@ describe("attachments serialization round-trip", () => {
 
 		const reserialized = await serializeAttachments(restored);
 		expect(reserialized).toEqual(serialized);
+	});
+
+	it("builds synchronous blob preview images on frame 0 and reuses them across canonical payloads", async () => {
+		const originalCreateObjectURL = URL.createObjectURL;
+		const originalRevokeObjectURL = URL.revokeObjectURL;
+		const createObjectURL = vi.fn(() => "blob:instant-shot-1");
+		const revokeObjectURL = vi.fn();
+		Object.assign(URL, {
+			createObjectURL,
+			revokeObjectURL,
+		});
+
+		try {
+			const imageFile = makePngFile("instant.png");
+			const optimistic = toOptimisticChatMessageImages([imageFile], "user_1");
+			expect(optimistic).toEqual([
+				{
+					id: "user_1_image_0",
+					mediaType: "image/png",
+					data: "",
+					previewUrl: "blob:instant-shot-1",
+				},
+			]);
+			const firstOptimistic = optimistic[0];
+			expect(firstOptimistic).toBeDefined();
+			if (!firstOptimistic) {
+				throw new Error("Expected optimistic image");
+			}
+			expect(resolveChatMessageImageSrc(firstOptimistic)).toBe(
+				"blob:instant-shot-1",
+			);
+
+			const serialized = await serializeAttachments([imageFile]);
+			const canonical = toChatMessageImages(serialized.userImages, "history_1");
+			expect(canonical).toHaveLength(1);
+			const firstCanonical = canonical[0];
+			if (!firstCanonical) {
+				throw new Error("Expected canonical image");
+			}
+			// Canonical history rows omit previewUrl on the schema object yet still
+			// resolve to the already-decoded blob URL in this window.
+			expect(resolveChatMessageImageSrc(firstCanonical)).toBe(
+				"blob:instant-shot-1",
+			);
+
+			evictCachedImagePreviewUrl("blob:instant-shot-1");
+			expect(revokeObjectURL).toHaveBeenCalledWith("blob:instant-shot-1");
+			expect(resolveChatMessageImageSrc(firstCanonical)).toBe(
+				`data:image/png;base64,${ONE_BY_ONE_PNG_BASE64}`,
+			);
+		} finally {
+			Object.assign(URL, {
+				createObjectURL: originalCreateObjectURL,
+				revokeObjectURL: originalRevokeObjectURL,
+			});
+		}
+	});
+
+	it("pre-warms base64 image data so optimistic descriptors already carry data when sent", async () => {
+		const imageFile = makePngFile("warmed.png");
+		warmAttachmentFiles([imageFile]);
+		await serializeAttachments([imageFile]);
+
+		const optimistic = toOptimisticChatMessageImages([imageFile], "user_warm");
+		expect(optimistic).toEqual([
+			expect.objectContaining({
+				id: "user_warm_image_0",
+				mediaType: "image/png",
+				data: ONE_BY_ONE_PNG_BASE64,
+			}),
+		]);
 	});
 });

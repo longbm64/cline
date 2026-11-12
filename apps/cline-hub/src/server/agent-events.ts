@@ -58,6 +58,14 @@ function forwardAgentEvent(
 		return;
 	}
 	if (event.type === "content_update" && event.contentType === "tool") {
+		if (
+			event.update &&
+			typeof event.update === "object" &&
+			!Array.isArray(event.update) &&
+			(event.update as { phase?: unknown }).phase === "input_streaming"
+		) {
+			return;
+		}
 		const toolEvent: WebviewToolEvent = {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,

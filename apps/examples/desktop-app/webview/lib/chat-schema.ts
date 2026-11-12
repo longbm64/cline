@@ -57,11 +57,16 @@ export const ChatMessageRoleSchema = z.enum([
 	"error",
 ]);
 
-export const ChatMessageImageSchema = z.object({
-	id: z.string().min(1),
-	mediaType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-	data: z.string().min(1),
-});
+export const ChatMessageImageSchema = z
+	.object({
+		id: z.string().min(1),
+		mediaType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+		data: z.string(),
+		previewUrl: z.string().min(1).optional(),
+	})
+	.refine((image) => image.data.length > 0 || Boolean(image.previewUrl), {
+		message: "Image must contain base64 data or a preview URL",
+	});
 
 export const ChatMessageMediaSchema = GeneratedMediaSchema;
 
@@ -98,6 +103,7 @@ export const ChatMessageSchema = z.object({
 			providerAuth: ProviderAuthInfoSchema.optional(),
 			modelId: z.string().optional(),
 			userRunSpan: z.number().int().nonnegative().optional(),
+			clientRenderKey: z.string().min(1).optional(),
 			/**
 			 * Files attached to a user message (resolved `@` mentions), relative
 			 * to the session's mention base directory when inside it.

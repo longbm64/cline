@@ -62,7 +62,6 @@ import {
 	type SessionImportRequest,
 	SessionImportService,
 	type SessionImportTool,
-	SqliteSessionStore,
 	saveVoiceInputSettings,
 	setAutoUpdateEnabledGlobally,
 	setMcpServerDisabled,
@@ -126,6 +125,7 @@ import {
 	getEnvironmentContext,
 	getEnvironmentContexts,
 	getRuntimeBinding,
+	readSubagentLiveStreams,
 	resolveSidecarAskQuestion,
 	sendEventToClient,
 } from "./context";
@@ -204,6 +204,7 @@ import {
 	readSessionMessages,
 } from "./session-data/messages";
 import { searchWorkspaceFiles } from "./session-data/search";
+import { getSharedSessionStore } from "./session-data/store";
 import {
 	getCommitDetails,
 	getCommitFileDiff,
@@ -420,7 +421,7 @@ async function readSessionCheckpoints(
 	if (fromHub.length > 0) return fromHub;
 	try {
 		return readSessionCheckpointHistory(
-			new SqliteSessionStore().get(sessionId) ?? undefined,
+			getSharedSessionStore().get(sessionId) ?? undefined,
 		);
 	} catch {
 		return [];
@@ -661,7 +662,7 @@ async function getSessionFromSidecarManager(
 	sessionId: string,
 	environmentId?: string,
 ): Promise<JsonRecord | undefined> {
-	const store = new SqliteSessionStore();
+	const store = getSharedSessionStore();
 	const binding = environmentId
 		? getRuntimeBinding(ctx, environmentId)
 		: await findSessionRuntimeBinding(ctx, sessionId);
@@ -706,17 +707,62 @@ function isSidebarSessionWithPrompt(session: JsonRecord): boolean {
 	return typeof session.prompt === "string" && Boolean(session.prompt.trim());
 }
 
+function normalizeComparableWorkspacePath(value: unknown): string {
+	if (typeof value !== "string") {
+		return "";
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return "";
+	}
+	const withoutTrailing = trimmed.replace(/[\\/]+$/, "");
+	const normalized = withoutTrailing || trimmed[0] || "";
+	return /^[A-Za-z]:/.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
 async function listSessionsFromSidecarManager(
 	ctx: SidecarContext,
 	limit: number,
+	workspaceRootFilter?: string,
 ): Promise<unknown> {
 	const max = Math.max(1, Math.floor(limit));
+	const normalizedFilter = normalizeComparableWorkspacePath(workspaceRootFilter);
+	const scanLimit = normalizedFilter ? Math.max(max * 4, 300) : max;
 	const byId = new Map<string, JsonRecord>();
-	const store = new SqliteSessionStore();
+	const store = getSharedSessionStore();
+	let localPersistedById: Map<string, JsonRecord> | null = null;
+	const getLocalPersisted = (sessionId: string): JsonRecord | undefined => {
+		if (localPersistedById === null) {
+			localPersistedById = new Map();
+			if (typeof store.list === "function") {
+				for (const row of store.list(Math.max(scanLimit * 2, 400))) {
+					if (row?.sessionId) {
+						localPersistedById.set(
+							row.sessionId,
+							row as unknown as JsonRecord,
+						);
+					}
+				}
+			}
+		}
+		return (
+			localPersistedById.get(sessionId) ??
+			(store.get(sessionId) as unknown as JsonRecord | undefined)
+		);
+	};
+	const matchesWorkspace = (candidate: JsonRecord): boolean => {
+		if (!normalizedFilter) {
+			return true;
+		}
+		const sessionWorkspace = normalizeComparableWorkspacePath(
+			candidate.workspaceRoot || candidate.workspace_root || candidate.cwd || "",
+		);
+		return sessionWorkspace === normalizedFilter;
+	};
 
 	for (const binding of ctx.runtimeBindings.values()) {
 		try {
-			const sessions = await binding.sessionManager.list(max, {
+			const sessions = await binding.sessionManager.list(scanLimit, {
 				hydrate: false,
 			});
 			for (const item of sessions) {
@@ -731,10 +777,9 @@ async function listSessionsFromSidecarManager(
 				const merged = mergePersistedSessionRecord(
 					sessionId,
 					record,
-					binding.kind === "local"
-						? (store.get(sessionId) as unknown as JsonRecord | undefined)
-						: undefined,
+					binding.kind === "local" ? getLocalPersisted(sessionId) : undefined,
 				);
+				if (!matchesWorkspace(merged)) continue;
 				if (!isSidebarSessionWithPrompt(merged)) {
 					// Attachment-only sessions may have no textual prompt metadata.
 					const messages =
@@ -765,7 +810,10 @@ async function listSessionsFromSidecarManager(
 	}
 
 	if (byId.size === 0) {
-		for (const session of store.list(max)) {
+		for (const session of store.list(scanLimit)) {
+			if (!matchesWorkspace(session as unknown as JsonRecord)) {
+				continue;
+			}
 			session.prompt =
 				session.prompt?.trim() ||
 				derivePromptFromMessages(
@@ -789,7 +837,7 @@ async function listSessionsFromSidecarManager(
 			if (!prompt) continue;
 			const key = JSON.stringify([scoped.activeEnvironmentId, sessionId]);
 			const existing = byId.get(key);
-			byId.set(key, {
+			const candidate: JsonRecord = {
 				...(existing ?? {}),
 				sessionId,
 				environmentId: scoped.activeEnvironmentId,
@@ -815,7 +863,9 @@ async function listSessionsFromSidecarManager(
 						: {}) as JsonRecord),
 					...(session.title ? { title: session.title } : {}),
 				},
-			});
+			};
+			if (!matchesWorkspace(candidate)) continue;
+			byId.set(key, candidate);
 		}
 	}
 	return Array.from(byId.values())
@@ -2359,6 +2409,18 @@ export async function handleCommand(
 			typeof args?.limit === "number" ? args.limit : 200,
 		);
 	}
+	if (command === "read_subagent_live_streams") {
+		const sessionId = String(args?.sessionId ?? "").trim();
+		const environmentId =
+			typeof args?.environmentId === "string" && args.environmentId.trim()
+				? args.environmentId.trim()
+				: LOCAL_ENVIRONMENT_ID;
+		const scoped = getEnvironmentContext(ctx, environmentId);
+		return {
+			boot: scoped.bootId,
+			streams: sessionId ? readSubagentLiveStreams(scoped, sessionId) : {},
+		};
+	}
 
 	// ── Process context ───────────────────────────────────────────────
 	if (command === "get_process_context") {
@@ -2585,11 +2647,16 @@ export async function handleCommand(
 	}
 	if (command === "list_discovered_sessions") {
 		const limit = typeof args?.limit === "number" ? args.limit : 300;
+		const workspaceRoot =
+			typeof args?.workspaceRoot === "string"
+				? args.workspaceRoot.trim() || undefined
+				: undefined;
 		const local = (await listSessionsFromSidecarManager(
 			ctx,
 			limit,
+			workspaceRoot,
 		)) as JsonRecord[];
-		if (!isCloudAgentsEnabled()) return local;
+		if (workspaceRoot || !isCloudAgentsEnabled()) return local;
 		const cloud = await getCloudSessionManager(ctx)
 			.listForDiscovery({ timeoutMs: CLOUD_DISCOVERY_BUDGET_MS })
 			.catch((error) => {
@@ -2793,7 +2860,7 @@ export async function handleCommand(
 		// removes the key, which is how callers clear a flag.
 		const binding = await getCommandSessionBinding(ctx, sessionId, args);
 		if (!binding) throw new Error(`Session ${sessionId} not found`);
-		const store = new SqliteSessionStore();
+		const store = getSharedSessionStore();
 		const asRecord = (value: unknown): JsonRecord =>
 			value && typeof value === "object" && !Array.isArray(value)
 				? (value as JsonRecord)
@@ -2836,7 +2903,7 @@ export async function handleCommand(
 			return true;
 		}
 		ctx.logger?.log("Deleting desktop chat session", { command, sessionId });
-		const store = new SqliteSessionStore();
+		const store = getSharedSessionStore();
 		const row = store.get(sessionId);
 		const manifest = readSessionManifest(sessionId);
 		const sessionCwd =

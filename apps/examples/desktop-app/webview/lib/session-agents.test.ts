@@ -509,4 +509,23 @@ describe("mergeAgentActivity", () => {
 		);
 		expect(merged.total).toBe(4);
 	});
+
+	it("keeps interrupted prior-turn subagents unresolved when a new user turn starts", () => {
+		const activity = buildSessionAgentActivity(
+			[
+				textMessage("user", "first turn"),
+				toolMessage({
+					toolName: "spawn_agent",
+					hookEventName: "tool_call_start",
+				}),
+				textMessage("user", "second turn"),
+			],
+			ACTIVE,
+		);
+		expect(activity).toMatchObject({
+			total: 1,
+			running: 0,
+			unresolved: 1,
+		});
+	});
 });

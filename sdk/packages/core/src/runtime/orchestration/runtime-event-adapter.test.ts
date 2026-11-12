@@ -972,6 +972,41 @@ describe("toLegacyAgentEvent — stateless helper", () => {
 // ---------------------------------------------------------------------------
 
 describe("RuntimeEventAdapter — exhaustiveness", () => {
+	it("maps tool-call-delta with toolName to an input_streaming tool content_update", () => {
+		const adapter = new RuntimeEventAdapter();
+		expect(
+			adapter.translate({
+				type: "tool-call-delta",
+				snapshot: makeSnapshot(),
+				iteration: 1,
+				toolCallId: "call_edit_1",
+				toolName: "editor",
+				inputPreview:
+					'{"path":"/workspace/web/index.html","insert_line":42,"new_text":"setElText(',
+			}),
+		).toEqual([
+			{
+				type: "content_update",
+				contentType: "tool",
+				toolName: "editor",
+				toolCallId: "call_edit_1",
+				update: {
+					phase: "input_streaming",
+					inputPreview:
+						'{"path":"/workspace/web/index.html","insert_line":42,"new_text":"setElText(',
+				},
+			},
+		]);
+
+		expect(
+			adapter.translate({
+				type: "tool-call-delta",
+				snapshot: makeSnapshot(),
+				iteration: 1,
+			}),
+		).toEqual([]);
+	});
+
 	it("handles every one of the 13 AgentRuntimeEvent variants without throwing", () => {
 		const adapter = new RuntimeEventAdapter();
 		const variants: AgentRuntimeEvent[] = [

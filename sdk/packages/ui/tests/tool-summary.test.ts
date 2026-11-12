@@ -4,6 +4,7 @@ import {
 	buildReadFilesKeys,
 	buildToolSummary,
 	classifyTool,
+	describeStreamingToolCall,
 	extractOutputMedia,
 	extractOutputText,
 	normalizeToolName,
@@ -887,5 +888,76 @@ describe("shortenPath", () => {
 		expect(short.length).toBeLessThanOrEqual(50);
 		expect(short.startsWith(".../")).toBe(true);
 		expect(short.endsWith("file-name.ts")).toBe(true);
+	});
+});
+
+describe("describeStreamingToolCall", () => {
+	it("shows Writing... immediately for editor and refines as path and action arrive", () => {
+		expect(describeStreamingToolCall("editor")).toBe("Writing...");
+		// Unclosed path does not flash a partial filename.
+		expect(
+			describeStreamingToolCall("editor", '{"path":"/Users/app/web/ind'),
+		).toBe("Writing...");
+		expect(
+			describeStreamingToolCall(
+				"editor",
+				'{"path":"/Users/app/web/index.html","new_text":"<div>',
+			),
+		).toBe("Writing index.html...");
+		expect(
+			describeStreamingToolCall(
+				"editor",
+				'{"path":"/Users/app/web/index.html","insert_line":42,"new_text":"setElText(',
+			),
+		).toBe("Inserting into index.html · Writing...");
+		expect(
+			describeStreamingToolCall(
+				"editor",
+				'{"path":"/Users/app/web/index.html","old_text":"const a = 1","new_text":"const a = 2',
+			),
+		).toBe("Editing file index.html · Writing...");
+		expect(
+			describeStreamingToolCall(
+				"editor",
+				'{"path":"/Users/app/web/index.html","old_text":null,"insert_line":null,"new_text":"<!doctype html>',
+			),
+		).toBe("Creating file index.html · Writing...");
+	});
+
+	it("parses raw and JSON-escaped apply_patch headers once complete", () => {
+		expect(describeStreamingToolCall("apply_patch")).toBe("Writing...");
+		expect(
+			describeStreamingToolCall(
+				"apply_patch",
+				'{"patch":"*** Begin Patch\\n*** Update File: web/ind',
+			),
+		).toBe("Writing...");
+		expect(
+			describeStreamingToolCall(
+				"apply_patch",
+				'{"patch":"*** Begin Patch\\n*** Update File: web/index.html\\n@@\\n+hello',
+			),
+		).toBe("Editing file index.html · Writing...");
+		expect(
+			describeStreamingToolCall(
+				"apply_patch",
+				"*** Begin Patch\n*** Add File: src/new-view.tsx\n+export const x = 1;",
+			),
+		).toBe("Creating file new-view.tsx · Writing...");
+	});
+
+	it("describes non-edit tools progressively", () => {
+		expect(
+			describeStreamingToolCall(
+				"read_files",
+				'{"files":[{"path":"src/app.tsx"',
+			),
+		).toBe("Reading file app.tsx...");
+		expect(
+			describeStreamingToolCall("run_commands", '{"commands":["bun test"'),
+		).toBe("Running command...");
+		expect(
+			describeStreamingToolCall("run_commands", '{"command":"bun test"}'),
+		).toBe("Running command bun test");
 	});
 });

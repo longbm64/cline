@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { SqliteSessionStore } from "@cline/core";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { MessageWithMetadata } from "@cline/shared";
+import { getSharedSessionStore } from "./store";
 
 /**
  * Child agents of a chat session: `spawn_agent` subagent runs and team-task
@@ -74,7 +74,7 @@ export function readChildSessionMessages(
 	}
 	let record: { parentSessionId?: string; messagesPath?: string } | undefined;
 	try {
-		record = new SqliteSessionStore().get(trimmed);
+		record = getSharedSessionStore().get(trimmed);
 	} catch {
 		// No session database on this host; nothing to resolve.
 		return null;
@@ -147,6 +147,60 @@ function deriveLastAction(messages: unknown[]): string | undefined {
 	return undefined;
 }
 
+const MAX_AGENT_TRANSCRIPT_META_CACHE = 500;
+const agentTranscriptMetaCache = new Map<
+	string,
+	{
+		mtimeMs: number;
+		size: number;
+		lastAction?: string;
+		hasMessages: boolean;
+	}
+>();
+
+function readChildTranscriptSummary(messagesPath: string | undefined): {
+	lastAction?: string;
+	hasMessages: boolean;
+} {
+	if (!messagesPath) {
+		return { hasMessages: false };
+	}
+	let stat: { mtimeMs: number; size: number };
+	try {
+		stat = statSync(messagesPath);
+	} catch {
+		agentTranscriptMetaCache.delete(messagesPath);
+		return { hasMessages: false };
+	}
+	const cached = agentTranscriptMetaCache.get(messagesPath);
+	if (
+		cached &&
+		cached.mtimeMs === stat.mtimeMs &&
+		cached.size === stat.size
+	) {
+		return {
+			lastAction: cached.lastAction,
+			hasMessages: cached.hasMessages,
+		};
+	}
+	const messages = readMessagesFile(messagesPath);
+	const hasMessages = Boolean(messages && messages.length > 0);
+	const lastAction = hasMessages && messages ? deriveLastAction(messages) : undefined;
+	if (agentTranscriptMetaCache.size >= MAX_AGENT_TRANSCRIPT_META_CACHE) {
+		const oldest = agentTranscriptMetaCache.keys().next().value;
+		if (oldest !== undefined) {
+			agentTranscriptMetaCache.delete(oldest);
+		}
+	}
+	agentTranscriptMetaCache.set(messagesPath, {
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+		lastAction,
+		hasMessages,
+	});
+	return { lastAction, hasMessages };
+}
+
 export function listSessionAgents(
 	rootSessionId: string,
 	limit = 200,
@@ -155,7 +209,7 @@ export function listSessionAgents(
 	if (!trimmedRootId) {
 		return [];
 	}
-	const store = new SqliteSessionStore();
+	const store = getSharedSessionStore();
 	const out: SessionAgentRecord[] = [];
 	for (const record of store.listChildren(trimmedRootId, limit)) {
 		const agentId = record.agentId?.trim();
@@ -163,7 +217,7 @@ export function listSessionAgents(
 			continue;
 		}
 		const messagesPath = resolveChildMessagesPath(record);
-		const messages = messagesPath ? readMessagesFile(messagesPath) : null;
+		const summary = readChildTranscriptSummary(messagesPath);
 		out.push({
 			sessionId: record.sessionId,
 			agentId,
@@ -173,13 +227,13 @@ export function listSessionAgents(
 				: "subagent",
 			status: record.status,
 			prompt: record.prompt,
-			lastAction: messages?.length ? deriveLastAction(messages) : undefined,
+			lastAction: summary.lastAction,
 			teamName: record.teamName,
 			provider: record.provider || undefined,
 			model: record.model || undefined,
 			startedAt: record.startedAt,
 			endedAt: record.endedAt ?? undefined,
-			hasMessages: Boolean(messages && messages.length > 0),
+			hasMessages: summary.hasMessages,
 		});
 	}
 	return out;

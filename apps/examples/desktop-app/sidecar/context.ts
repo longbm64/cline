@@ -32,6 +32,7 @@ import {
 } from "./feature-flags";
 import { recordHubActivity } from "./hub-admin";
 import { sessionLogPath } from "./paths";
+import { closeSharedSessionStore } from "./session-data/store";
 import type {
 	LiveSession,
 	PendingAskQuestion,
@@ -40,6 +41,7 @@ import type {
 	SessionRuntimeBinding,
 	SidecarContext,
 	SidecarWebSocketClient,
+	SubagentLiveChunk,
 } from "./types";
 import { LOCAL_ENVIRONMENT_ID } from "./types";
 
@@ -338,19 +340,177 @@ export function sendPromptsInQueueSnapshot(
 // Agent event mapping: AgentEvent → frontend transport chunks
 // ---------------------------------------------------------------------------
 
+const MAX_SUBAGENT_LIVE_CHUNKS = 600;
+
+export type ChildAgentIdentity = {
+	agentId: string;
+	parentAgentId?: string;
+	kind: "subagent" | "teamtask";
+};
+
+function extractCoreChildAgentIdentity(
+	event: AgentEvent,
+	overrides?: { teamRole?: string; teamAgentId?: string },
+): ChildAgentIdentity | null {
+	const record =
+		event && typeof event === "object"
+			? (event as unknown as Record<string, unknown>)
+			: undefined;
+	const parentAgentId =
+		typeof record?.parentAgentId === "string" &&
+		record.parentAgentId.trim().length > 0
+			? record.parentAgentId.trim()
+			: undefined;
+	const isTeammate = overrides?.teamRole === "teammate";
+	if (!parentAgentId && !isTeammate) {
+		return null;
+	}
+	const teamAgentId =
+		typeof overrides?.teamAgentId === "string" &&
+		overrides.teamAgentId.trim().length > 0
+			? overrides.teamAgentId.trim()
+			: undefined;
+	const rawAgentId =
+		typeof record?.agentId === "string" && record.agentId.trim().length > 0
+			? record.agentId.trim()
+			: undefined;
+	const agentId = isTeammate ? (teamAgentId ?? rawAgentId) : rawAgentId;
+	if (!agentId) {
+		return null;
+	}
+	return {
+		agentId,
+		parentAgentId,
+		kind: isTeammate ? "teamtask" : "subagent",
+	};
+}
+
+function extractHubChildAgentIdentity(
+	payload: Record<string, unknown> | undefined,
+): ChildAgentIdentity | null {
+	const agent =
+		payload?.agent &&
+		typeof payload.agent === "object" &&
+		!Array.isArray(payload.agent)
+			? (payload.agent as Record<string, unknown>)
+			: undefined;
+	if (!agent) {
+		return null;
+	}
+	const isTeammate = agent.kind === "teammate" || agent.teamRole === "teammate";
+	const parentAgentId =
+		typeof agent.parentAgentId === "string" &&
+		agent.parentAgentId.trim().length > 0
+			? agent.parentAgentId.trim()
+			: undefined;
+	const isSubagent = agent.kind === "subagent" || Boolean(parentAgentId);
+	if (!isTeammate && !isSubagent) {
+		return null;
+	}
+	const teamAgentId =
+		typeof agent.teamAgentId === "string" && agent.teamAgentId.trim().length > 0
+			? agent.teamAgentId.trim()
+			: undefined;
+	const rawAgentId =
+		typeof agent.agentId === "string" && agent.agentId.trim().length > 0
+			? agent.agentId.trim()
+			: undefined;
+	const agentId = isTeammate ? (teamAgentId ?? rawAgentId) : rawAgentId;
+	if (!agentId) {
+		return null;
+	}
+	return {
+		agentId,
+		parentAgentId,
+		kind: isTeammate ? "teamtask" : "subagent",
+	};
+}
+
+function emitSubagentChunk(
+	ctx: SidecarContext,
+	sessionId: string,
+	child: ChildAgentIdentity,
+	stream: string,
+	chunk: string,
+): void {
+	const ts = nowMs();
+	const streamKey = `${sessionId}::${child.agentId}`;
+	const nextIndex = (ctx.streamIndices.get(streamKey) ?? 0) + 1;
+	ctx.streamIndices.set(streamKey, nextIndex);
+
+	const liveSession = ctx.liveSessions.get(sessionId);
+	if (liveSession) {
+		let map = liveSession.subagentStreams;
+		if (!map) {
+			map = new Map();
+			liveSession.subagentStreams = map;
+		}
+		const bucket = map.get(child.agentId) ?? [];
+		bucket.push({
+			agentId: child.agentId,
+			parentAgentId: child.parentAgentId,
+			kind: child.kind,
+			stream,
+			chunk,
+			ts,
+			index: nextIndex,
+		});
+		if (bucket.length > MAX_SUBAGENT_LIVE_CHUNKS) {
+			bucket.splice(0, bucket.length - MAX_SUBAGENT_LIVE_CHUNKS);
+		}
+		map.set(child.agentId, bucket);
+	}
+
+	sendEvent(ctx, "subagent_chat_event", {
+		sessionId,
+		agentId: child.agentId,
+		parentAgentId: child.parentAgentId,
+		kind: child.kind,
+		stream,
+		chunk,
+		ts,
+		index: nextIndex,
+		boot: ctx.bootId,
+	});
+}
+
+export function readSubagentLiveStreams(
+	ctx: SidecarContext,
+	sessionId: string,
+): Record<string, SubagentLiveChunk[]> {
+	const liveSession = ctx.liveSessions.get(sessionId);
+	if (!liveSession?.subagentStreams) {
+		return {};
+	}
+	const out: Record<string, SubagentLiveChunk[]> = {};
+	for (const [agentId, chunks] of liveSession.subagentStreams.entries()) {
+		if (chunks.length > 0) {
+			out[agentId] = [...chunks];
+		}
+	}
+	return out;
+}
+
 function handleAgentEvent(
 	ctx: SidecarContext,
 	sessionId: string,
 	event: AgentEvent,
+	child?: ChildAgentIdentity | null,
 ): void {
+	const emitTargetChunk = (stream: string, chunk: string) => {
+		if (child) {
+			emitSubagentChunk(ctx, sessionId, child, stream, chunk);
+		} else {
+			emitChunk(ctx, sessionId, stream, chunk);
+		}
+	};
+
 	switch (event.type) {
 		case "content_start": {
 			if (event.contentType === "text" && event.text) {
-				emitChunk(ctx, sessionId, "chat_text", event.text);
+				emitTargetChunk("chat_text", event.text);
 			} else if (event.contentType === "reasoning" && event.reasoning) {
-				emitChunk(
-					ctx,
-					sessionId,
+				emitTargetChunk(
 					"chat_reasoning",
 					JSON.stringify({
 						text: event.reasoning,
@@ -358,9 +518,7 @@ function handleAgentEvent(
 					}),
 				);
 			} else if (event.contentType === "tool") {
-				emitChunk(
-					ctx,
-					sessionId,
+				emitTargetChunk(
 					"chat_tool_call_start",
 					JSON.stringify({
 						toolCallId: event.toolCallId,
@@ -373,9 +531,7 @@ function handleAgentEvent(
 		}
 		case "content_update": {
 			if (event.contentType === "tool") {
-				emitChunk(
-					ctx,
-					sessionId,
+				emitTargetChunk(
 					"chat_tool_call_update",
 					JSON.stringify({
 						toolCallId: event.toolCallId,
@@ -395,13 +551,11 @@ function handleAgentEvent(
 				break;
 			}
 			if (event.contentType === "media" && event.media) {
-				emitChunk(ctx, sessionId, "chat_media", JSON.stringify(event.media));
+				emitTargetChunk("chat_media", JSON.stringify(event.media));
 				break;
 			}
 			if (event.contentType === "tool") {
-				emitChunk(
-					ctx,
-					sessionId,
+				emitTargetChunk(
 					"chat_tool_call_end",
 					JSON.stringify({
 						toolCallId: event.toolCallId,
@@ -415,9 +569,7 @@ function handleAgentEvent(
 			break;
 		}
 		case "notice": {
-			emitChunk(
-				ctx,
-				sessionId,
+			emitTargetChunk(
 				"chat_core_log",
 				JSON.stringify({
 					level: event.noticeType === "recovery" ? "warn" : "info",
@@ -430,9 +582,7 @@ function handleAgentEvent(
 			break;
 		}
 		case "usage": {
-			emitChunk(
-				ctx,
-				sessionId,
+			emitTargetChunk(
 				"chat_usage",
 				JSON.stringify({
 					inputTokens: event.inputTokens,
@@ -448,15 +598,15 @@ function handleAgentEvent(
 			break;
 		}
 		case "done": {
-			cancelSidecarMistakeQuestions(ctx, sessionId, "Run ended");
-			const session = ctx.liveSessions.get(sessionId);
-			if (session) {
-				session.busy = false;
-				session.status = event.reason === "completed" ? "idle" : event.reason;
+			if (!child) {
+				cancelSidecarMistakeQuestions(ctx, sessionId, "Run ended");
+				const session = ctx.liveSessions.get(sessionId);
+				if (session) {
+					session.busy = false;
+					session.status = event.reason === "completed" ? "idle" : event.reason;
+				}
 			}
-			emitChunk(
-				ctx,
-				sessionId,
+			emitTargetChunk(
 				"chat_done",
 				JSON.stringify({
 					reason: event.reason,
@@ -472,9 +622,7 @@ function handleAgentEvent(
 				event.error instanceof Error
 					? event.error.message
 					: String(event.error);
-			emitChunk(
-				ctx,
-				sessionId,
+			emitTargetChunk(
 				"chat_core_log",
 				JSON.stringify({
 					level: "error",
@@ -484,6 +632,13 @@ function handleAgentEvent(
 			break;
 		}
 		case "iteration_start": {
+			if (child) {
+				emitTargetChunk(
+					"chat_iteration_start",
+					JSON.stringify({ iteration: event.iteration }),
+				);
+				break;
+			}
 			const session = ctx.liveSessions.get(sessionId);
 			if (session) {
 				// Iterations restart at one for each user run. Keep the previous
@@ -550,8 +705,17 @@ export function handleCoreSessionEvent(
 			break;
 		}
 		case "agent_event": {
-			const { sessionId, event: agentEvent } = event.payload;
-			handleAgentEvent(ctx, sessionId, agentEvent);
+			const {
+				sessionId,
+				event: agentEvent,
+				teamRole,
+				teamAgentId,
+			} = event.payload;
+			const child = extractCoreChildAgentIdentity(agentEvent, {
+				teamRole,
+				teamAgentId,
+			});
+			handleAgentEvent(ctx, sessionId, agentEvent, child);
 			break;
 		}
 		case "pending_prompts": {
@@ -739,6 +903,7 @@ export async function disposeSidecarContext(
 	// Shuts down the PostHog client the feature flags service owns, flushing
 	// any pending $feature_flag_called events.
 	cleanup.push(disposeDesktopFeatureFlagsService());
+	closeSharedSessionStore();
 
 	const results = [...approvalResults, ...(await Promise.allSettled(cleanup))];
 	const firstFailure = results.find(
@@ -986,19 +1151,42 @@ export function handleHubLiveEvent(
 		return;
 	}
 
+	const hubChild = extractHubChildAgentIdentity(event.payload);
+	const emitProjectedChunk = (stream: string, chunk: string) => {
+		if (hubChild) {
+			emitSubagentChunk(ctx, sessionId, hubChild, stream, chunk);
+		} else {
+			emitChunk(ctx, sessionId, stream, chunk);
+		}
+	};
+
 	switch (event.event) {
+		case "iteration.started": {
+			if (hubChild) {
+				emitProjectedChunk(
+					"chat_iteration_start",
+					JSON.stringify({
+						iteration:
+							typeof event.payload?.iteration === "number"
+								? event.payload.iteration
+								: 0,
+					}),
+				);
+			}
+			return;
+		}
 		case "assistant.delta": {
 			const text =
 				typeof event.payload?.text === "string" ? event.payload.text : "";
 			if (text) {
-				emitChunk(ctx, sessionId, "chat_text", text);
+				emitProjectedChunk("chat_text", text);
 			}
 			return;
 		}
 		case "assistant.media": {
 			const media = event.payload?.media;
 			if (isGeneratedMedia(media)) {
-				emitChunk(ctx, sessionId, "chat_media", JSON.stringify(media));
+				emitProjectedChunk("chat_media", JSON.stringify(media));
 			}
 			return;
 		}
@@ -1009,12 +1197,7 @@ export function handleHubLiveEvent(
 			if (!text && !redacted) {
 				return;
 			}
-			emitChunk(
-				ctx,
-				sessionId,
-				"chat_reasoning",
-				JSON.stringify({ text, redacted }),
-			);
+			emitProjectedChunk("chat_reasoning", JSON.stringify({ text, redacted }));
 			return;
 		}
 		case "usage.updated": {
@@ -1030,9 +1213,7 @@ export function handleHubLiveEvent(
 				!Array.isArray(event.payload.totals)
 					? (event.payload.totals as Record<string, unknown>)
 					: {};
-			emitChunk(
-				ctx,
-				sessionId,
+			emitProjectedChunk(
 				"chat_usage",
 				JSON.stringify({
 					inputTokens: delta.inputTokens,
@@ -1045,6 +1226,29 @@ export function handleHubLiveEvent(
 					totalCost: totals.totalCost,
 				}),
 			);
+			return;
+		}
+		case "agent.done": {
+			if (hubChild) {
+				emitProjectedChunk(
+					"chat_done",
+					JSON.stringify({
+						reason:
+							typeof event.payload?.reason === "string"
+								? event.payload.reason
+								: "completed",
+						text:
+							typeof event.payload?.text === "string"
+								? event.payload.text
+								: undefined,
+						iterations:
+							typeof event.payload?.iterations === "number"
+								? event.payload.iterations
+								: undefined,
+						usage: event.payload?.usage,
+					}),
+				);
+			}
 			return;
 		}
 		case "session.pending_prompts": {
@@ -1096,9 +1300,7 @@ export function handleHubLiveEvent(
 			return;
 		}
 		case "tool.started": {
-			emitChunk(
-				ctx,
-				sessionId,
+			emitProjectedChunk(
 				"chat_tool_call_start",
 				JSON.stringify({
 					toolCallId:
@@ -1115,9 +1317,7 @@ export function handleHubLiveEvent(
 			return;
 		}
 		case "tool.updated": {
-			emitChunk(
-				ctx,
-				sessionId,
+			emitProjectedChunk(
 				"chat_tool_call_update",
 				JSON.stringify({
 					toolCallId:
@@ -1134,9 +1334,7 @@ export function handleHubLiveEvent(
 			return;
 		}
 		case "tool.finished": {
-			emitChunk(
-				ctx,
-				sessionId,
+			emitProjectedChunk(
 				"chat_tool_call_end",
 				JSON.stringify({
 					toolCallId:

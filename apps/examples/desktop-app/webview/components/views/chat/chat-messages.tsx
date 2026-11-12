@@ -38,6 +38,7 @@ import {
 	buildPreviousTimestampMap,
 	buildTurnCompletionDurationMap,
 	buildUserRunCountMap,
+	type ChatRenderItem,
 	collapseCompletedWork,
 	formatWorkDuration,
 	getThoughtDurationMilliseconds,
@@ -53,6 +54,10 @@ import {
 import { ToolMessageBlock } from "./messages/tool-message-block";
 import { buildToolPresentation } from "./messages/tool-summaries";
 import { TurnReceipt } from "./messages/turn-receipt";
+import {
+	useProgressiveRenderWindow,
+	useStableConversationKey,
+} from "./messages/use-progressive-render-window";
 import { WorkBlock } from "./messages/work-block";
 import { TranscriptOutline } from "./transcript-outline";
 
@@ -71,6 +76,8 @@ type ChatMessagesProps = {
 	importedFromTool?: SessionImportTool;
 	/** Replaces "Thinking..." while the runtime reports a named pre-output step. */
 	activityLabel?: string | null;
+	/** Live label while the model streams tool-call arguments (e.g. "Writing..."). */
+	streamingToolLabel?: string | null;
 	streamingMessageId?: string | null;
 	pendingToolApprovals: ToolApprovalRequestItem[];
 	pendingAskQuestions: AskQuestionRequestItem[];
@@ -102,6 +109,8 @@ type ChatMessagesProps = {
 	 */
 	lastTurnChanges?: SessionChangeSet;
 	onReviewLastTurn?: (path?: string) => void;
+	/** Tighter horizontal padding and no outline gutter for parallel subagent columns. */
+	compact?: boolean;
 };
 
 type AskQuestionRequestItem = {
@@ -126,6 +135,7 @@ function ChatMessagesImpl({
 	error,
 	importedFromTool,
 	activityLabel = null,
+	streamingToolLabel = null,
 	streamingMessageId = null,
 	pendingToolApprovals,
 	pendingAskQuestions,
@@ -142,6 +152,7 @@ function ChatMessagesImpl({
 	onFixCredentials,
 	lastTurnChanges,
 	onReviewLastTurn,
+	compact = false,
 }: ChatMessagesProps) {
 	const hasMessages = messages.length > 0;
 	// Scanned from the tail without copying: this component re-renders on
@@ -192,7 +203,9 @@ function ChatMessagesImpl({
 			}
 			const presentation = buildToolPresentation(candidate);
 			if (presentation.inProgress) {
-				return presentation.summary.label;
+				return presentation.summary.kind === "edit"
+					? `${presentation.summary.label} · Writing...`
+					: presentation.summary.label;
 			}
 		}
 		return null;
@@ -207,10 +220,19 @@ function ChatMessagesImpl({
 	);
 	const streamingTextLength = streamingMessage?.content.length ?? 0;
 	const streamingReasoningLength = streamingMessage?.reasoning?.length ?? 0;
+	const streamingReasoningRedacted = Boolean(
+		streamingMessage?.reasoningRedacted,
+	);
+	const hasVisibleStreamingOutput = Boolean(
+		streamingMessage?.content.trim() ||
+			streamingMessage?.reasoning?.trim() ||
+			streamingReasoningRedacted,
+	);
 	const [idleStreamingState, setIdleStreamingState] = useState<{
 		messageId: string;
 		textLength: number;
 		reasoningLength: number;
+		reasoningRedacted: boolean;
 	} | null>(null);
 	// When the model finishes streaming a plan/narration paragraph (e.g.
 	// "Kế hoạch xử lý:") or a reasoning trace and spends several seconds
@@ -220,13 +242,17 @@ function ChatMessagesImpl({
 	// surfaces immediately below the assistant message.
 	const isStreamingTextIdle =
 		Boolean(streamingMessageId) &&
-		(streamingTextLength > 0 || streamingReasoningLength > 0) &&
+		hasVisibleStreamingOutput &&
 		idleStreamingState?.messageId === streamingMessageId &&
 		idleStreamingState.textLength === streamingTextLength &&
-		idleStreamingState.reasoningLength === streamingReasoningLength;
+		idleStreamingState.reasoningLength === streamingReasoningLength &&
+		idleStreamingState.reasoningRedacted === streamingReasoningRedacted;
 	const isAwaitingFirstOutput =
 		status === "running" &&
-		(!streamingMessageId || isStreamingTextIdle) &&
+		(!streamingMessageId ||
+			!hasVisibleStreamingOutput ||
+			isStreamingTextIdle ||
+			Boolean(streamingToolLabel)) &&
 		!lastToolInProgress &&
 		pendingToolApprovals.length === 0 &&
 		pendingAskQuestions.length === 0;
@@ -287,6 +313,19 @@ function ChatMessagesImpl({
 			}),
 		[messages, collapseTrailingRun],
 	);
+	const conversationKey = useStableConversationKey(sessionId, hasMessages);
+	const {
+		renderedItems,
+		renderedStartIndex,
+		hasOlderItems,
+		viewportRef,
+		handleViewportScroll,
+		ensureMessageRendered,
+	} = useProgressiveRenderWindow({
+		sessionId,
+		conversationKey,
+		renderItems,
+	});
 	const isRunActive =
 		!isHistoryPreview &&
 		(status === "starting" || status === "running" || status === "stopping");
@@ -334,12 +373,7 @@ function ChatMessagesImpl({
 			}),
 		[messages, collapseTrailingRun, streamingMessageId, isHistoryPreview],
 	);
-	const isShowingThinkingIndicator =
-		(status === "starting" || isAwaitingFirstOutput ||
-			(lastToolInProgress && isRunActive)) &&
-		!isSessionSwitching &&
-		!isHistoryPreview;
-	const [thinkingElapsedSeconds, setThinkingElapsedSeconds] = useState(0);
+	const thinkingResetKey = `${messages.length}:${streamingTextLength}:${streamingReasoningLength}`;
 	// Shown only once the latest turn finishes; sending the next message
 	// starts a new turn, which hides it until that turn's changes arrive.
 	const showLastTurnReceipt =
@@ -356,40 +390,29 @@ function ChatMessagesImpl({
 	}, [sessionId]);
 
 	useEffect(() => {
-		if (!isShowingThinkingIndicator) {
-			setThinkingElapsedSeconds(0);
-			return;
-		}
-		setThinkingElapsedSeconds(0);
-		const startedAt = Date.now();
-		const interval = window.setInterval(() => {
-			setThinkingElapsedSeconds(
-				Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
-			);
-		}, 1000);
-		return () => {
-			window.clearInterval(interval);
-		};
-	}, [
-		isShowingThinkingIndicator,
-		messages.length,
-		streamingTextLength,
-		streamingReasoningLength,
-	]);
-
-	useEffect(() => {
 		if (
 			status !== "running" ||
 			!streamingMessageId ||
-			(streamingTextLength === 0 && streamingReasoningLength === 0)
+			!hasVisibleStreamingOutput
 		) {
 			return;
 		}
 		const timer = window.setTimeout(() => {
-			setIdleStreamingState({
-				messageId: streamingMessageId,
-				textLength: streamingTextLength,
-				reasoningLength: streamingReasoningLength,
+			setIdleStreamingState((prev) => {
+				if (
+					prev?.messageId === streamingMessageId &&
+					prev.textLength === streamingTextLength &&
+					prev.reasoningLength === streamingReasoningLength &&
+					prev.reasoningRedacted === streamingReasoningRedacted
+				) {
+					return prev;
+				}
+				return {
+					messageId: streamingMessageId,
+					textLength: streamingTextLength,
+					reasoningLength: streamingReasoningLength,
+					reasoningRedacted: streamingReasoningRedacted,
+				};
 			});
 		}, 350);
 		return () => {
@@ -398,8 +421,10 @@ function ChatMessagesImpl({
 	}, [
 		status,
 		streamingMessageId,
+		hasVisibleStreamingOutput,
 		streamingTextLength,
 		streamingReasoningLength,
+		streamingReasoningRedacted,
 	]);
 
 	useEffect(() => {
@@ -668,7 +693,7 @@ function ChatMessagesImpl({
 
 	return (
 		<MessageScrollerProvider
-			key={sessionId ?? "new-chat"}
+			key={conversationKey}
 			autoScroll
 			defaultScrollPosition="end"
 			scrollMargin={24}
@@ -677,21 +702,31 @@ function ChatMessagesImpl({
 				<MessageScrollerViewport
 					aria-label="Agent conversation"
 					className="h-full min-h-0 min-w-0"
+					data-hidden-item-count={
+						renderedStartIndex > 0 ? renderedStartIndex : undefined
+					}
+					onScroll={handleViewportScroll}
+					ref={viewportRef}
 				>
 					<MessageScrollerContent
 						className={cn(
-							"mx-auto w-full min-w-0 max-w-[calc(var(--breakpoint-lg)+3rem)] gap-4",
-							showIdleDetails ? "p-0" : "pt-6 pb-16 pl-12 pr-6",
+							"mx-auto w-full min-w-0 max-w-[calc(var(--breakpoint-lg)+3rem)]",
+							showIdleDetails
+								? "gap-4 p-0"
+								: compact
+									? "gap-3 px-3 pt-3 pb-8"
+									: "gap-4 pt-6 pb-16 pl-12 pr-6",
 						)}
 					>
 						{showIdleDetails ? null : (
 							<>
-								{importedFromTool ? (
+								{importedFromTool && !hasOlderItems ? (
 									<MessageScrollerItem messageId="imported-session">
 										<ImportedSessionNotice tool={importedFromTool} />
 									</MessageScrollerItem>
 								) : null}
-								{renderItems.map((item, itemIndex) => {
+								{renderedItems.map((item, sliceIndex) => {
+									const itemIndex = renderedStartIndex + sliceIndex;
 									// Working rows — live (`run`) or folded (`work`) — render
 									// through one child renderer so a row keeps its exact look
 									// and position when the run collapses. Those rows keep
@@ -731,7 +766,10 @@ function ChatMessagesImpl({
 												completionDurationMilliseconds={turnCompletionDurationByMessageId.get(
 													child.message.id,
 												)}
-												key={child.message.id}
+												key={
+													child.message.meta?.clientRenderKey ??
+													child.message.id
+												}
 												message={child.message}
 												onCopyMessage={handleCopyMessage}
 												onExpandImage={handleExpandImage}
@@ -768,16 +806,32 @@ function ChatMessagesImpl({
 												messageId={`work_${item.id}`}
 											>
 												<WorkBlock
+													copiedChildMessageId={
+														copiedMessageId &&
+														workItemHasMessageId(item.items, copiedMessageId)
+															? copiedMessageId
+															: null
+													}
 													durationMilliseconds={item.durationMilliseconds}
+													items={item.items}
 													key={`work_${item.id}`}
+													onCopyMessage={handleCopyMessage}
+													onExpandImage={handleExpandImage}
+													onProceedWhileRunning={onProceedWhileRunning}
+													previousTimestampByMessage={
+														previousTimestampByMessage
+													}
 													toolCallCount={item.toolCallCount}
-												>
-													{item.items.map(renderWorkingRow)}
-												</WorkBlock>
+													turnCompletionDurationByMessageId={
+														turnCompletionDurationByMessageId
+													}
+												/>
 											</MessageScrollerItem>
 										);
 									}
 									const { agentRole, message, reasoningMessages } = item;
+									const messageRenderKey =
+										message.meta?.clientRenderKey ?? message.id;
 									// An answer directly under its run's working rows belongs
 									// to them — pull it closer than the full transcript gap.
 									const previousItem = renderItems[itemIndex - 1];
@@ -787,7 +841,7 @@ function ChatMessagesImpl({
 										previousItem.type !== "message";
 									return (
 										<MessageScrollerItem
-											key={message.id}
+											key={messageRenderKey}
 											messageId={message.id}
 											scrollAnchor={
 												message.role === "user" &&
@@ -809,7 +863,7 @@ function ChatMessagesImpl({
 												completionDurationMilliseconds={turnCompletionDurationByMessageId.get(
 													message.id,
 												)}
-												key={message.id}
+												key={messageRenderKey}
 												message={message}
 												runCount={userRunCountByMessage.get(message)}
 												onExpandImage={handleExpandImage}
@@ -882,7 +936,9 @@ function ChatMessagesImpl({
 								    reasoning/tool trigger's geometry exactly (icon slot,
 								    min-height, padding), so the first real row replaces it
 								    in place with no jump. */}
-								{(status === "starting" || isAwaitingFirstOutput || (lastToolInProgress && isRunActive)) &&
+								{(status === "starting" ||
+									isAwaitingFirstOutput ||
+									(lastToolInProgress && isRunActive)) &&
 								!isSessionSwitching &&
 								!isHistoryPreview ? (
 									<MessageScrollerItem
@@ -894,13 +950,13 @@ function ChatMessagesImpl({
 									>
 										<Loader2 className="size-4 animate-spin" />
 										<span className={STREAMING_TITLE_CLASS}>
-											{startingLabel ?? lastToolInProgressLabel ?? activityLabel ?? "Thinking..."}
+											{startingLabel ??
+												lastToolInProgressLabel ??
+												streamingToolLabel ??
+												activityLabel ??
+												"Thinking..."}
 										</span>
-										{thinkingElapsedSeconds >= 1 ? (
-											<span className="text-xs font-normal text-muted-foreground/70">
-												({formatWorkDuration(thinkingElapsedSeconds * 1000)})
-											</span>
-										) : null}
+										<ThinkingElapsedBadge resetKey={thinkingResetKey} />
 									</MessageScrollerItem>
 								) : null}
 								{pendingToolApprovals.length > 0 ? (
@@ -997,7 +1053,12 @@ function ChatMessagesImpl({
 					</MessageScrollerContent>
 				</MessageScrollerViewport>
 				<MessageScrollerButton />
-				<TranscriptOutline messages={messages} />
+				{compact ? null : (
+					<TranscriptOutline
+						messages={messages}
+						onEnsureMessageRendered={ensureMessageRendered}
+					/>
+				)}
 				{visibleExpandedImage ? (
 					<ChatImageLightbox
 						image={visibleExpandedImage}
@@ -1086,6 +1147,38 @@ function ChatMessagesImpl({
 
 export const ChatMessages = memo(ChatMessagesImpl);
 
+const ThinkingElapsedBadge = memo(function ThinkingElapsedBadge({
+	resetKey,
+}: {
+	resetKey: string;
+}) {
+	const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+	useEffect(() => {
+		void resetKey;
+		setElapsedSeconds(0);
+		const startedAt = Date.now();
+		const interval = window.setInterval(() => {
+			setElapsedSeconds(
+				Math.max(1, Math.floor((Date.now() - startedAt) / 1000)),
+			);
+		}, 1000);
+		return () => {
+			window.clearInterval(interval);
+		};
+	}, [resetKey]);
+
+	if (elapsedSeconds < 1) {
+		return null;
+	}
+
+	return (
+		<span className="text-xs font-normal text-muted-foreground/70">
+			({formatWorkDuration(elapsedSeconds * 1000)})
+		</span>
+	);
+});
+
 function pruneRequestMap<T extends string>(
 	prev: Record<string, T>,
 	activeRequestIds: Set<string>,
@@ -1100,4 +1193,22 @@ function pruneRequestMap<T extends string>(
 		hasRemoved = true;
 	}
 	return hasRemoved ? next : prev;
+}
+
+function workItemHasMessageId(
+	items: readonly ChatRenderItem[],
+	targetId: string,
+): boolean {
+	for (const item of items) {
+		if (item.type === "message" && item.message.id === targetId) {
+			return true;
+		}
+		if (
+			(item.type === "work" || item.type === "run") &&
+			workItemHasMessageId(item.items, targetId)
+		) {
+			return true;
+		}
+	}
+	return false;
 }

@@ -682,12 +682,16 @@ export type AgentRuntimeEvent =
 	| {
 			/**
 			 * Progress while the model streams a tool call's arguments. Carries
-			 * no arguments: consumers use it only to tell a slow stream from a
-			 * silent one.
+			 * optional tool identity and a short prefix of the raw argument
+			 * stream so UIs can show live activity (e.g. "Writing index.html...")
+			 * instead of appearing frozen during large file edits.
 			 */
 			type: "tool-call-delta";
 			snapshot: AgentRuntimeStateSnapshot;
 			iteration: number;
+			toolCallId?: string;
+			toolName?: string;
+			inputPreview?: string;
 	  }
 	| {
 			type: "tool-started";

@@ -4,6 +4,7 @@ import {
 	formatDisplayUserInput,
 	type ProviderAuthInfo,
 } from "@cline/shared/browser";
+import { describeStreamingToolCall } from "@cline/ui/components/agent-chat/tool-summary";
 import {
 	createElement,
 	useCallback,
@@ -15,6 +16,7 @@ import {
 import {
 	serializeAttachments,
 	toChatMessageImages,
+	toOptimisticChatMessageImages,
 } from "@/hooks/chat-session/attachments";
 import {
 	getInitialChatConfig,
@@ -34,7 +36,13 @@ import {
 	resolveCredentialError,
 	resolveCredentialFailureHint,
 } from "@/hooks/chat-session/helpers";
-import { canReplaceFailedTurn } from "@/hooks/chat-session/history-reconciliation";
+import {
+	canApplyCanonicalHistory,
+	findLastUserTurnIndex,
+	hasAssistantInLatestTurn,
+	hasTerminalOutputInLatestTurn,
+	preserveClientRenderKeys,
+} from "@/hooks/chat-session/history-reconciliation";
 import type {
 	AgentChunkEvent,
 	AskQuestionRequestItem,
@@ -488,6 +496,57 @@ function updateMessageById(
 	return changed ? next : messages;
 }
 
+function mergeOptimisticImages(
+	existing: ChatMessage["images"],
+	incoming: NonNullable<ChatMessage["images"]>,
+): NonNullable<ChatMessage["images"]> {
+	if (!existing || existing.length === 0) {
+		return incoming;
+	}
+	let withPreview: NonNullable<ChatMessage["images"]> | null = null;
+	for (let index = 0; index < incoming.length; index += 1) {
+		const target = incoming[index];
+		const prev = existing[index];
+		if (
+			target &&
+			prev?.previewUrl &&
+			!target.previewUrl &&
+			prev.mediaType === target.mediaType
+		) {
+			if (!withPreview) {
+				withPreview = incoming.slice(0, index);
+			}
+			withPreview.push({ ...target, previewUrl: prev.previewUrl });
+		} else if (withPreview && target) {
+			withPreview.push(target);
+		}
+	}
+	return withPreview ?? incoming;
+}
+
+function sameMessageImages(
+	left: ChatMessage["images"],
+	right: ChatMessage["images"],
+): boolean {
+	if (left === right) return true;
+	if (!left || !right || left.length !== right.length) return false;
+	for (let i = 0; i < left.length; i += 1) {
+		const a = left[i];
+		const b = right[i];
+		if (
+			!a ||
+			!b ||
+			a.id !== b.id ||
+			a.mediaType !== b.mediaType ||
+			a.data !== b.data ||
+			a.previewUrl !== b.previewUrl
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
 type SessionUsageSummary = {
 	tokensIn: number;
 	tokensOut: number;
@@ -499,6 +558,43 @@ type TurnCostTracker = {
 	streamedCostUsd: number;
 };
 
+const parsedDiffToolEventCache = new WeakMap<
+	ChatMessage,
+	SessionHookEvent | null
+>();
+
+function parseToolMessageDiffEvent(
+	message: ChatMessage,
+): SessionHookEvent | null {
+	if (parsedDiffToolEventCache.has(message)) {
+		return parsedDiffToolEventCache.get(message) ?? null;
+	}
+	let payload: {
+		toolName?: string;
+		input?: unknown;
+		result?: unknown;
+		isError?: boolean;
+	} | null = null;
+	try {
+		payload = JSON.parse(message.content);
+	} catch {
+		parsedDiffToolEventCache.set(message, null);
+		return null;
+	}
+	if (!payload?.toolName || payload.result == null || payload.isError) {
+		parsedDiffToolEventCache.set(message, null);
+		return null;
+	}
+	const event: SessionHookEvent = {
+		hookName: "tool_result",
+		toolName: payload.toolName,
+		toolInput: payload.input,
+		toolOutput: payload.result,
+	};
+	parsedDiffToolEventCache.set(message, event);
+	return event;
+}
+
 /**
  * Read current context usage and cumulative cost from persisted chat messages.
  *
@@ -509,6 +605,7 @@ type TurnCostTracker = {
  */
 function summarizeSessionUsage(
 	messages: ChatMessage[],
+	sessionId: string,
 ): SessionUsageSummary | undefined {
 	let tokensIn: number | undefined;
 	let tokensOut: number | undefined;
@@ -517,6 +614,7 @@ function summarizeSessionUsage(
 	let hasCost = false;
 
 	for (const message of messages) {
+		if (message.sessionId !== sessionId) continue;
 		const meta = message.meta;
 		if (!meta) continue;
 		if (
@@ -650,6 +748,10 @@ export function useChatSession(
 	// Names what the runtime is doing before the first output of a turn (in
 	// place of "Thinking..."); ephemeral, cleared when the turn moves on.
 	const [activityLabel, setActivityLabel] = useState<string | null>(null);
+	// Live label while the model streams tool-call arguments (e.g. "Writing...").
+	const [streamingToolLabel, setStreamingToolLabel] = useState<string | null>(
+		null,
+	);
 	const [hydratedHistorySessionId, setHydratedHistorySessionId] = useState<
 		string | null
 	>(null);
@@ -761,12 +863,7 @@ export function useChatSession(
 		desktopClient.getTransportError(),
 	);
 	const persistedUsage = useMemo(
-		() =>
-			sessionId
-				? summarizeSessionUsage(
-						messages.filter((message) => message.sessionId === sessionId),
-					)
-				: undefined,
+		() => (sessionId ? summarizeSessionUsage(messages, sessionId) : undefined),
 		[messages, sessionId],
 	);
 	const persistedTokensIn = persistedUsage?.tokensIn;
@@ -843,6 +940,7 @@ export function useChatSession(
 		liveToolMessageIdsRef.current = {};
 		liveToolInputsRef.current = {};
 		pendingToolOutputRef.current = new Map();
+		setStreamingToolLabel(null);
 	}, []);
 
 	const applyCloudSnapshotMessages = useCallback(
@@ -1042,19 +1140,19 @@ export function useChatSession(
 		[],
 	);
 
-	// Keep a live failure while persistence catches up. Once canonical history
-	// contains the failed turn's error, it replaces the temporary UI bubble.
+	// Keep live messages while persistence catches up: never overwrite a newer
+	// turn with a stale snapshot from an earlier turn, and preserve client render
+	// keys so bubbles update in place without unmounting/remounting.
 	const applyCanonicalHistory = useCallback(
 		(sid: string, historyMessages: ChatMessage[]) => {
 			setMessages((prev) => {
 				const sessionMessages = prev.filter(
 					(message) => message.sessionId === sid,
 				);
-				// Keep the entire live turn, including partial assistant/tool output,
-				// until canonical history contains this run's terminal error.
-				if (!canReplaceFailedTurn(sessionMessages, historyMessages))
+				if (!canApplyCanonicalHistory(sessionMessages, historyMessages)) {
 					return prev;
-				return historyMessages;
+				}
+				return preserveClientRenderKeys(sessionMessages, historyMessages);
 			});
 		},
 		[],
@@ -1086,42 +1184,54 @@ export function useChatSession(
 			const epoch = turnEpochRef.current;
 			if (turnEndReconcileTimerRef.current !== null) {
 				clearTimeout(turnEndReconcileTimerRef.current);
-			}
-			turnEndReconcileTimerRef.current = setTimeout(() => {
 				turnEndReconcileTimerRef.current = null;
-				void desktopClient
-					.invoke<ChatMessage[]>("read_session_messages", {
-						environmentId,
-						sessionId: sid,
-						maxMessages: MAX_MESSAGES,
-					})
-					.then((historyMessages) => {
-						if (
-							activeSessionIdRef.current !== sid ||
-							turnEpochRef.current !== epoch ||
-							activePromptSubmissionsRef.current > 0
-						) {
-							// A new turn started while the read was in flight; its
-							// own lifecycle owns the transcript from here on.
-							return;
-						}
-						if (
-							historyMessages.length === 0 ||
-							!historyMessages.some(
-								(message) =>
-									message.role === "assistant" || message.role === "error",
-							)
-						) {
-							// Persistence has not caught up: keep the live state
-							// rather than wiping it with an incomplete transcript.
-							return;
-						}
-						applyCanonicalHistory(sid, historyMessages);
-					})
-					.catch(() => {
-						// Keep optimistic state if the hydration read fails.
-					});
-			}, TURN_END_RECONCILE_DELAY_MS);
+			}
+			const retryDelays = [TURN_END_RECONCILE_DELAY_MS, 600, 1200];
+			const scheduleReconcileAttempt = (attemptIndex: number) => {
+				const delay = retryDelays[attemptIndex];
+				if (delay === undefined) {
+					return;
+				}
+				turnEndReconcileTimerRef.current = setTimeout(() => {
+					turnEndReconcileTimerRef.current = null;
+					void desktopClient
+						.invoke<ChatMessage[]>("read_session_messages", {
+							environmentId,
+							sessionId: sid,
+							maxMessages: MAX_MESSAGES,
+						})
+						.then((historyMessages) => {
+							if (
+								activeSessionIdRef.current !== sid ||
+								turnEpochRef.current !== epoch ||
+								activePromptSubmissionsRef.current > 0
+							) {
+								// A new turn started while the read was in flight; its
+								// own lifecycle owns the transcript from here on.
+								return;
+							}
+							const liveSessionMessages = messagesRef.current.filter(
+								(message) => message.sessionId === sid,
+							);
+							if (
+								historyMessages.length === 0 ||
+								!hasTerminalOutputInLatestTurn(historyMessages) ||
+								!canApplyCanonicalHistory(liveSessionMessages, historyMessages)
+							) {
+								// Persistence has not caught up with the latest turn yet:
+								// keep live state and schedule a bounded retry rather than
+								// wiping the latest turn with an older snapshot.
+								scheduleReconcileAttempt(attemptIndex + 1);
+								return;
+							}
+							applyCanonicalHistory(sid, historyMessages);
+						})
+						.catch(() => {
+							// Keep optimistic state if the hydration read fails.
+						});
+				}, delay);
+			};
+			scheduleReconcileAttempt(0);
 		},
 		[applyCanonicalHistory, environmentId],
 	);
@@ -1513,9 +1623,15 @@ export function useChatSession(
 					return;
 				}
 				setConfig((prev) => {
-					const currentWorkspace = (prev.workspaceRoot || prev.cwd || "").trim();
+					const currentWorkspace = (
+						prev.workspaceRoot ||
+						prev.cwd ||
+						""
+					).trim();
 					const selectionChangedWhileLoading = Boolean(currentWorkspace);
-					const workspace = selectionChangedWhileLoading ? currentWorkspace : "";
+					const workspace = selectionChangedWhileLoading
+						? currentWorkspace
+						: "";
 					return {
 						...prev,
 						environmentId,
@@ -1599,8 +1715,15 @@ export function useChatSession(
 	// Fallback for sessions with no tool events in the hook log (e.g. sessions
 	// recorded before tool_call/tool_result hook logging existed): rebuild the
 	// diff state from the tool messages themselves.
+	const lastFallbackDiffCheckRef = useRef<{
+		sessionId: string;
+		cwd?: string;
+		eventCount: number;
+		lastEvent?: SessionHookEvent;
+	} | null>(null);
 	useEffect(() => {
 		if (!sessionId || fileDiffs.length > 0) {
+			lastFallbackDiffCheckRef.current = null;
 			return;
 		}
 		const events: SessionHookEvent[] = [];
@@ -1608,30 +1731,36 @@ export function useChatSession(
 			if (message.sessionId !== sessionId || message.role !== "tool") {
 				continue;
 			}
-			let payload: {
-				toolName?: string;
-				input?: unknown;
-				result?: unknown;
-				isError?: boolean;
-			} | null = null;
-			try {
-				payload = JSON.parse(message.content);
-			} catch {
-				continue;
+			const event = parseToolMessageDiffEvent(message);
+			if (event) {
+				events.push(event);
 			}
-			if (!payload?.toolName || payload.result == null || payload.isError) {
-				continue;
-			}
-			events.push({
-				hookName: "tool_result",
-				toolName: payload.toolName,
-				toolInput: payload.input,
-				toolOutput: payload.result,
-			});
 		}
 		if (events.length === 0) {
+			lastFallbackDiffCheckRef.current = {
+				sessionId,
+				cwd: sessionDiffCwd,
+				eventCount: 0,
+			};
 			return;
 		}
+		const lastEvent = events.at(-1);
+		const prev = lastFallbackDiffCheckRef.current;
+		if (
+			prev &&
+			prev.sessionId === sessionId &&
+			prev.cwd === sessionDiffCwd &&
+			prev.eventCount === events.length &&
+			prev.lastEvent === lastEvent
+		) {
+			return;
+		}
+		lastFallbackDiffCheckRef.current = {
+			sessionId,
+			cwd: sessionDiffCwd,
+			eventCount: events.length,
+			lastEvent,
+		};
 		const diffState = buildSessionDiffState(events, sessionDiffCwd);
 		if (diffState.fileDiffs.length === 0) {
 			return;
@@ -1802,6 +1931,13 @@ export function useChatSession(
 
 			// --- Text stream (buffered) ---
 			if (payload.stream === "chat_text") {
+				if (!payload.chunk) {
+					return;
+				}
+				setStreamingToolLabel(null);
+				setStatus((prev) =>
+					prev === "completed" || prev === "idle" ? "running" : prev,
+				);
 				let assistantId = activeAssistantMessageIdRef.current;
 				if (!assistantId) {
 					assistantId = makeId("assistant");
@@ -1811,6 +1947,7 @@ export function useChatSession(
 						role: "assistant",
 						content: "",
 						createdAt: chunkCreatedAt(),
+						meta: { clientRenderKey: assistantId },
 					});
 					activeAssistantMessageIdRef.current = assistantId;
 					reconcileAssistantMessageIdRef.current = assistantId;
@@ -1827,6 +1964,19 @@ export function useChatSession(
 			}
 
 			if (payload.stream === "chat_reasoning") {
+				let parsed: ReasoningDeltaEvent = {};
+				try {
+					parsed = JSON.parse(payload.chunk) as ReasoningDeltaEvent;
+				} catch {
+					parsed = { text: payload.chunk };
+				}
+				if (!parsed.text && parsed.redacted !== true) {
+					return;
+				}
+				setStreamingToolLabel(null);
+				setStatus((prev) =>
+					prev === "completed" || prev === "idle" ? "running" : prev,
+				);
 				let assistantId = activeAssistantMessageIdRef.current;
 				if (!assistantId) {
 					assistantId = makeId("assistant");
@@ -1836,26 +1986,19 @@ export function useChatSession(
 						role: "assistant",
 						content: "",
 						createdAt: chunkCreatedAt(),
+						meta: { clientRenderKey: assistantId },
 					});
 					activeAssistantMessageIdRef.current = assistantId;
 					reconcileAssistantMessageIdRef.current = assistantId;
 					setActiveAssistantMessageId(assistantId);
 				}
-				let parsed: ReasoningDeltaEvent = {};
-				try {
-					parsed = JSON.parse(payload.chunk) as ReasoningDeltaEvent;
-				} catch {
-					parsed = { text: payload.chunk };
-				}
-				if (parsed.text || parsed.redacted === true) {
-					const pending = pendingStreamReasoningRef.current;
-					const existing = pending.get(assistantId);
-					pending.set(assistantId, {
-						text: `${existing?.text ?? ""}${parsed.text ?? ""}`,
-						redacted: (existing?.redacted ?? false) || parsed.redacted === true,
-					});
-					schedulePendingStreamFlush();
-				}
+				const pending = pendingStreamReasoningRef.current;
+				const existing = pending.get(assistantId);
+				pending.set(assistantId, {
+					text: `${existing?.text ?? ""}${parsed.text ?? ""}`,
+					redacted: (existing?.redacted ?? false) || parsed.redacted === true,
+				});
+				schedulePendingStreamFlush();
 				return;
 			}
 
@@ -1866,17 +2009,34 @@ export function useChatSession(
 				} catch {
 					return;
 				}
-				const toolCallId = parsed.toolCallId;
-				const messageId = toolCallId
-					? liveToolMessageIdsRef.current[toolCallId]
-					: undefined;
-				if (!messageId) return;
 				const update =
 					parsed.update &&
 					typeof parsed.update === "object" &&
 					!Array.isArray(parsed.update)
 						? (parsed.update as Record<string, unknown>)
 						: undefined;
+				if (update?.phase === "input_streaming") {
+					flushPendingStream();
+					activeAssistantMessageIdRef.current = null;
+					setActiveAssistantMessageId(null);
+					setStatus((prev) =>
+						prev === "completed" || prev === "idle" ? "running" : prev,
+					);
+					setStreamingToolLabel(
+						describeStreamingToolCall(
+							parsed.toolName ?? "tool",
+							typeof update.inputPreview === "string"
+								? update.inputPreview
+								: undefined,
+						),
+					);
+					return;
+				}
+				const toolCallId = parsed.toolCallId;
+				const messageId = toolCallId
+					? liveToolMessageIdsRef.current[toolCallId]
+					: undefined;
+				if (!messageId) return;
 				if (!update) return;
 				const stream = update.stream;
 				const chunk =
@@ -2084,7 +2244,15 @@ export function useChatSession(
 								next[i] = {
 									...candidate,
 									id: userMessageId,
-									images: images.length > 0 ? images : candidate.images,
+									images:
+										images.length > 0
+											? mergeOptimisticImages(candidate.images, images)
+											: candidate.images,
+									meta: {
+										...candidate.meta,
+										clientRenderKey:
+											candidate.meta?.clientRenderKey ?? candidate.id,
+									},
 								};
 								return sliceMessages(next);
 							}
@@ -2261,6 +2429,10 @@ export function useChatSession(
 				} catch {
 					return;
 				}
+				setStreamingToolLabel(null);
+				setStatus((prev) =>
+					prev === "completed" || prev === "idle" ? "running" : prev,
+				);
 				const toolName = parsed.toolName ?? "unknown_tool";
 				const toolCallId = parsed.toolCallId ?? makeId("tool_call");
 				const messageId = makeId("tool");
@@ -2291,6 +2463,7 @@ export function useChatSession(
 			}
 
 			// --- Tool call end ---
+			setStreamingToolLabel(null);
 			let parsed: ToolCallEndEvent = {};
 			try {
 				parsed = JSON.parse(payload.chunk) as ToolCallEndEvent;
@@ -3001,7 +3174,46 @@ export function useChatSession(
 				return false;
 			};
 
+			let optimisticImagesHydrated = false;
+			const applyOptimisticUserImages = (userImages: string[]) => {
+				if (!optimisticUserMessageId || optimisticImagesHydrated) {
+					return;
+				}
+				optimisticImagesHydrated = true;
+				const images = toChatMessageImages(userImages, optimisticUserMessageId);
+				setMessages((prev) => {
+					let changed = false;
+					const next = prev.map((message) => {
+						if (
+							message.id !== optimisticUserMessageId &&
+							message.meta?.clientRenderKey !== optimisticUserMessageId
+						) {
+							return message;
+						}
+						if (images.length === 0) {
+							if (!message.images?.length) return message;
+							changed = true;
+							return { ...message, images: undefined };
+						}
+						const merged = mergeOptimisticImages(message.images, images);
+						if (sameMessageImages(message.images, merged)) {
+							return message;
+						}
+						changed = true;
+						return { ...message, images: merged };
+					});
+					return changed ? next : prev;
+				});
+			};
+
 			if (optimisticUserMessageId) {
+				const initialOptimisticImages = toOptimisticChatMessageImages(
+					attachedFiles,
+					optimisticUserMessageId,
+				);
+				optimisticImagesHydrated =
+					initialOptimisticImages.length > 0 &&
+					initialOptimisticImages.every((image) => image.data.length > 0);
 				outstandingOptimisticUserIdsRef.current.add(optimisticUserMessageId);
 				if (parsed.executionTarget === "cloud") {
 					cloudOptimisticStatesRef.current.set(optimisticUserMessageId, {
@@ -3015,8 +3227,25 @@ export function useChatSession(
 					sessionId: plannedSessionId,
 					role: "user",
 					content: userLabel,
+					...(initialOptimisticImages.length > 0
+						? { images: initialOptimisticImages }
+						: {}),
 					createdAt: now,
+					meta: { clientRenderKey: optimisticUserMessageId },
 				});
+				if (
+					!optimisticImagesHydrated &&
+					attachedFiles.some((file) => Boolean(imageAttachmentMediaType(file)))
+				) {
+					// Hydrate base64 image data on the optimistic bubble as soon as
+					// FileReader finishes rather than blocking behind session startup.
+					void serializedAttachmentsTask.then((result) => {
+						if (!result.ok || result.attachments.userImages.length === 0) {
+							return;
+						}
+						applyOptimisticUserImages(result.attachments.userImages);
+					});
+				}
 				turnEpochRef.current += 1;
 				// Fresh turn: forget any error remembered from a previous turn so
 				// a detail-less failure of this turn cannot pick it up.
@@ -3169,17 +3398,17 @@ export function useChatSession(
 					);
 					if (cloudOptimistic) {
 						cloudOptimistic.sessionId = activeSessionId;
-						// Use the server-assigned ID so snapshot merging preserves
-						// the optimistic bubble, including a failed first send.
-						if (activeSessionId && activeSessionId !== plannedSessionId) {
-							const rekeyedSessionId = activeSessionId;
-							setMessages((prev) =>
-								updateMessageById(prev, optimisticUserMessageId, (message) => ({
-									...message,
-									sessionId: rekeyedSessionId,
-								})),
-							);
-						}
+					}
+					// Use the server-assigned ID on both local and cloud sessions so
+					// canonical/snapshot reconciliation always matches the optimistic bubble.
+					if (activeSessionId && activeSessionId !== plannedSessionId) {
+						const rekeyedSessionId = activeSessionId;
+						setMessages((prev) =>
+							updateMessageById(prev, optimisticUserMessageId, (message) => ({
+								...message,
+								sessionId: rekeyedSessionId,
+							})),
+						);
 					}
 				}
 				const serializedAttachmentsResult = await serializedAttachmentsTask;
@@ -3200,18 +3429,7 @@ export function useChatSession(
 					optimisticUserMessageId &&
 					serializedAttachments.userImages.length > 0
 				) {
-					const images = toChatMessageImages(
-						serializedAttachments.userImages,
-						optimisticUserMessageId,
-					);
-					if (images.length > 0) {
-						setMessages((prev) =>
-							updateMessageById(prev, optimisticUserMessageId, (message) => ({
-								...message,
-								images,
-							})),
-						);
-					}
+					applyOptimisticUserImages(serializedAttachments.userImages);
 				}
 				if (!shouldQueue) {
 					activeSessionIdRef.current = activeSessionId;
@@ -3479,6 +3697,7 @@ export function useChatSession(
 								reasoningRedacted:
 									fallbackAssistantTurn.reasoningRedacted || undefined,
 								createdAt: now + 1,
+								meta: { clientRenderKey: assistantMessageId },
 							},
 						]);
 					});
@@ -3567,13 +3786,15 @@ export function useChatSession(
 								preserveUnmatchedLive: true,
 							});
 						} else {
-							const hasCanonicalAssistantTurn = historyMessages.some(
+							const lastUserIndex = findLastUserTurnIndex(historyMessages);
+							const rawAssistantIndex = historyMessages.findLastIndex(
 								(message) => message.role === "assistant",
 							);
+							const assistantIndex =
+								rawAssistantIndex > lastUserIndex ? rawAssistantIndex : -1;
+							const hasCanonicalAssistantTurn =
+								hasAssistantInLatestTurn(historyMessages);
 							if (!hasFallbackAssistantTurn || hasCanonicalAssistantTurn) {
-								const assistantIndex = historyMessages.findLastIndex(
-									(message) => message.role === "assistant",
-								);
 								const canonicalMessages =
 									assistantIndex >= 0 && hasFallbackAssistantTurn
 										? historyMessages.map((message, index) => {
@@ -4496,8 +4717,7 @@ export function useChatSession(
 				return undefined;
 			}
 			let targetPromptId = trimmedId;
-			const optimisticEntry =
-				optimisticQueueEntriesRef.current.get(trimmedId);
+			const optimisticEntry = optimisticQueueEntriesRef.current.get(trimmedId);
 			if (optimisticEntry) {
 				optimisticEntry.cancelled = true;
 				let timer: ReturnType<typeof setTimeout> | undefined;
@@ -4575,6 +4795,7 @@ export function useChatSession(
 		isHydratingSession,
 		activeAssistantMessageId,
 		activityLabel,
+		streamingToolLabel,
 		isCompacting:
 			compactionSessionId !== null &&
 			compactionSessionId === sessionId &&

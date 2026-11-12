@@ -7,6 +7,7 @@ import {
 	APP_FONT_SIZE_STORAGE_KEY,
 	applyAppZoomAction,
 } from "@/lib/app-font-size";
+import { HUB_THEME_PRESET_STORAGE_KEY } from "@/lib/theme";
 import { SettingsView } from "./settings-view";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -112,5 +113,70 @@ describe("SettingsView font size", () => {
 		expect(container.textContent).toContain("20px");
 		expect(updatedSlider?.getAttribute("aria-valuenow")).toBe("20");
 		expect(increaseButton?.disabled).toBe(true);
+	});
+
+	it("selects and filters theme presets in General settings", async () => {
+		await act(async () => {
+			root.render(
+				<SettingsView
+					onExportDiagnostics={vi.fn()}
+					onNavigateSection={vi.fn()}
+					section="General"
+				/>,
+			);
+		});
+
+		const draculaButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Theme: Dracula"]',
+		);
+		const sunsetButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Theme: Sunset"]',
+		);
+		const oceanButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Theme: Ocean"]',
+		);
+		expect(draculaButton).not.toBeNull();
+		expect(sunsetButton).not.toBeNull();
+		expect(oceanButton).not.toBeNull();
+
+		await act(async () => {
+			draculaButton?.click();
+		});
+
+		expect(window.localStorage.getItem(HUB_THEME_PRESET_STORAGE_KEY)).toBe(
+			"dracula",
+		);
+		expect(document.documentElement.dataset.clineTheme).toBe("dracula");
+		expect(document.documentElement.classList.contains("dark")).toBe(true);
+		expect(draculaButton?.getAttribute("aria-pressed")).toBe("true");
+
+		await act(async () => {
+			sunsetButton?.click();
+		});
+
+		expect(window.localStorage.getItem(HUB_THEME_PRESET_STORAGE_KEY)).toBe(
+			"sunset",
+		);
+		expect(document.documentElement.dataset.clineTheme).toBe("sunset");
+		expect(document.documentElement.classList.contains("dark")).toBe(false);
+
+		const filterGroup = container.querySelector<HTMLElement>(
+			'fieldset[aria-label="Filter themes by mode"]',
+		);
+		const darkFilterButton = [
+			...(filterGroup?.querySelectorAll<HTMLButtonElement>("button") ?? []),
+		].find((btn) => btn.textContent === "Dark");
+		expect(darkFilterButton).toBeDefined();
+
+		await act(async () => {
+			darkFilterButton?.click();
+		});
+
+		expect(
+			container.querySelector('button[aria-label="Theme: Sunset"]'),
+		).toBeNull();
+		expect(
+			container.querySelector('button[aria-label="Theme: Dracula"]'),
+		).not.toBeNull();
 	});
 });

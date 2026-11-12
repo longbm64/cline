@@ -21,6 +21,7 @@ import {
 	PINNED_METADATA_KEY,
 } from "@/lib/session-history";
 import { eventEnvironmentId, sessionKey } from "@/lib/session-identity";
+import { isAppWindowFocused } from "@/lib/window-focus";
 import {
 	LOCAL_WORKSPACE_ENVIRONMENT_ID,
 	matchesScopedProject,
@@ -599,6 +600,20 @@ function mergeDiscoveredSessions(
 		.sort(compareSessionsByStartedAtDesc);
 }
 
+const MAX_UNKNOWN_SESSION_MISS_CACHE = 512;
+
+function addUnreadSessionId(
+	current: Set<string>,
+	sessionId: string,
+): Set<string> {
+	if (current.has(sessionId)) {
+		return current;
+	}
+	const next = new Set(current);
+	next.add(sessionId);
+	return next;
+}
+
 export function useSessionHistory({
 	activeSessionId,
 	onOpenSession,
@@ -638,7 +653,11 @@ export function useSessionHistory({
 		Map<string, ScheduledSessionLink>
 	>(() => new Map());
 	const fetchLimitRef = useRef(
-		readScopedProjectFromWindow() ? 250 : INITIAL_HISTORY_FETCH_LIMIT,
+		readScopedProjectFromWindow() ? 80 : INITIAL_HISTORY_FETCH_LIMIT,
+	);
+	const pendingUnknownCheckRef = useRef<Set<string>>(new Set());
+	const unknownRefreshCountBySessionRef = useRef<Map<string, number>>(
+		new Map(),
 	);
 	// Limit of the most recent refresh that actually returned sessions. Failed
 	// attempts roll back to this rather than to a caller-local snapshot, which
@@ -810,9 +829,16 @@ export function useSessionHistory({
 			const sessionsBeforeRefresh = sessionsRef.current;
 			const limit = fetchLimitRef.current;
 			refreshLimitRef.current = limit;
+			const checkedUnknownIds = [...pendingUnknownCheckRef.current];
+			const scopedProject = readScopedProjectFromWindow();
 			try {
 				const discovered = await desktopClient
-					.invoke<CliDiscoveredSession[]>("list_discovered_sessions", { limit })
+					.invoke<CliDiscoveredSession[]>(
+						"list_discovered_sessions",
+						scopedProject?.workspacePath
+							? { limit, workspaceRoot: scopedProject.workspacePath }
+							: { limit },
+					)
 					.catch(() => null);
 				// A scope change queues a fresh request after this one settles.
 				// Its old-account rows must not be applied in the meantime.
@@ -860,6 +886,47 @@ export function useSessionHistory({
 					topLevelSessions,
 					sessionsBeforeRefresh,
 				);
+				if (checkedUnknownIds.length > 0) {
+					const mergedKeys = new Set(mergedSessions.map(sessionKey));
+					const confirmedForeignIds: string[] = [];
+					for (const id of checkedUnknownIds) {
+						pendingUnknownCheckRef.current.delete(id);
+						if (mergedKeys.has(id)) {
+							unknownRefreshCountBySessionRef.current.delete(id);
+						} else {
+							if (
+								unknownRefreshCountBySessionRef.current.size >=
+									MAX_UNKNOWN_SESSION_MISS_CACHE &&
+								!unknownRefreshCountBySessionRef.current.has(id)
+							) {
+								const oldest = unknownRefreshCountBySessionRef.current
+									.keys()
+									.next().value;
+								if (oldest !== undefined) {
+									unknownRefreshCountBySessionRef.current.delete(oldest);
+								}
+							}
+							const nextMisses =
+								(unknownRefreshCountBySessionRef.current.get(id) ?? 0) + 1;
+							unknownRefreshCountBySessionRef.current.set(id, nextMisses);
+							if (nextMisses >= 2) {
+								confirmedForeignIds.push(id);
+							}
+						}
+					}
+					if (confirmedForeignIds.length > 0) {
+						setUnreadSessionIds((current) => {
+							if (!confirmedForeignIds.some((id) => current.has(id))) {
+								return current;
+							}
+							const next = new Set(current);
+							for (const id of confirmedForeignIds) {
+								next.delete(id);
+							}
+							return next;
+						});
+					}
+				}
 
 				setSessions((current) =>
 					areSessionsEquivalent(current, mergedSessions)
@@ -968,9 +1035,29 @@ export function useSessionHistory({
 		};
 
 		runRefresh();
+		let unfocusedTickCount = 0;
+		const handleWindowFocus = () => {
+			unfocusedTickCount = 0;
+			if (
+				!document.hidden &&
+				Date.now() - lastRefreshStartedAtRef.current >=
+					HISTORY_REFRESH_INTERVAL_MS
+			) {
+				runRefresh();
+			}
+		};
+		window.addEventListener("focus", handleWindowFocus);
 		const interval = window.setInterval(() => {
 			if (document.hidden) {
 				return;
+			}
+			if (!isAppWindowFocused()) {
+				unfocusedTickCount += 1;
+				if (unfocusedTickCount % 3 !== 0) {
+					return;
+				}
+			} else {
+				unfocusedTickCount = 0;
 			}
 			runRefresh();
 		}, HISTORY_REFRESH_INTERVAL_MS);
@@ -978,6 +1065,7 @@ export function useSessionHistory({
 		return () => {
 			disposed = true;
 			disposedRef.current = true;
+			window.removeEventListener("focus", handleWindowFocus);
 			window.clearInterval(interval);
 			if (refreshTimeoutRef.current !== null) {
 				window.clearTimeout(refreshTimeoutRef.current);
@@ -1243,6 +1331,8 @@ export function useSessionHistory({
 			setThreads((current) =>
 				current.filter((thread) => thread.id !== sessionId),
 			);
+			unknownRefreshCountBySessionRef.current.delete(sessionId);
+			pendingUnknownCheckRef.current.delete(sessionId);
 			scheduleRefresh(HISTORY_FAST_REFRESH_DELAY_MS, { force: true });
 		};
 
@@ -1307,19 +1397,30 @@ export function useSessionHistory({
 						session.status === status ? session : { ...session, status },
 					),
 				);
-				if (!known) {
-					scheduleRefresh(HISTORY_EVENT_REFRESH_DELAY_MS);
-				} else if (isTerminalHistoryStatus(status)) {
-					scheduleRefresh(HISTORY_TERMINAL_REFRESH_DELAY_MS, {
-						force: true,
-					});
-				}
-				if (sessionId !== activeSessionId) {
-					setUnreadSessionIds((current) => {
-						const next = new Set(current);
-						next.add(sessionId);
-						return next;
-					});
+				if (known) {
+					unknownRefreshCountBySessionRef.current.delete(sessionId);
+					if (isTerminalHistoryStatus(status)) {
+						scheduleRefresh(HISTORY_TERMINAL_REFRESH_DELAY_MS, {
+							force: true,
+						});
+					}
+					if (sessionId !== activeSessionId) {
+						setUnreadSessionIds((current) =>
+							addUnreadSessionId(current, sessionId),
+						);
+					}
+				} else {
+					const misses =
+						unknownRefreshCountBySessionRef.current.get(sessionId) ?? 0;
+					if (misses < 2) {
+						pendingUnknownCheckRef.current.add(sessionId);
+						scheduleRefresh(HISTORY_EVENT_REFRESH_DELAY_MS);
+						if (sessionId !== activeSessionId) {
+							setUnreadSessionIds((current) =>
+								addUnreadSessionId(current, sessionId),
+							);
+						}
+					}
 				}
 			},
 		);
@@ -1328,6 +1429,8 @@ export function useSessionHistory({
 			"cloud_sessions_changed",
 			() => {
 				cloudScopeInvalidatedRef.current = true;
+				unknownRefreshCountBySessionRef.current.clear();
+				pendingUnknownCheckRef.current.clear();
 				sessionsRef.current = sessionsRef.current.filter(
 					(session) => session.origin !== "cloud",
 				);
@@ -1351,19 +1454,27 @@ export function useSessionHistory({
 				}
 				const record = payload as SidecarSessionStateEvent;
 				if (record.sessionId?.trim()) {
-					scheduleRefresh(HISTORY_TERMINAL_REFRESH_DELAY_MS, {
-						force: true,
-					});
 					const sessionId = sessionKey({
 						sessionId: record.sessionId.trim(),
 						environmentId: record.environmentId,
 					});
-					if (sessionId !== activeSessionId) {
-						setUnreadSessionIds((current) => {
-							const next = new Set(current);
-							next.add(sessionId);
-							return next;
+					const known = sessionsRef.current.some(
+						(session) => sessionKey(session) === sessionId,
+					);
+					const misses =
+						unknownRefreshCountBySessionRef.current.get(sessionId) ?? 0;
+					if (known || misses < 2) {
+						if (!known) {
+							pendingUnknownCheckRef.current.add(sessionId);
+						}
+						scheduleRefresh(HISTORY_TERMINAL_REFRESH_DELAY_MS, {
+							force: true,
 						});
+						if (sessionId !== activeSessionId) {
+							setUnreadSessionIds((current) =>
+								addUnreadSessionId(current, sessionId),
+							);
+						}
 					}
 				}
 			},
@@ -1401,15 +1512,25 @@ export function useSessionHistory({
 				const known = sessionsRef.current.some(
 					(session) => sessionKey(session) === sessionId,
 				);
-				if (!known) {
-					scheduleRefresh(HISTORY_EVENT_REFRESH_DELAY_MS);
+				if (known) {
+					unknownRefreshCountBySessionRef.current.delete(sessionId);
+					if (sessionId !== activeSessionId) {
+						setUnreadSessionIds((current) =>
+							addUnreadSessionId(current, sessionId),
+						);
+					}
+					return;
 				}
-				if (sessionId !== activeSessionId) {
-					setUnreadSessionIds((current) => {
-						const next = new Set(current);
-						next.add(sessionId);
-						return next;
-					});
+				const misses =
+					unknownRefreshCountBySessionRef.current.get(sessionId) ?? 0;
+				if (misses < 2) {
+					pendingUnknownCheckRef.current.add(sessionId);
+					scheduleRefresh(HISTORY_EVENT_REFRESH_DELAY_MS);
+					if (sessionId !== activeSessionId) {
+						setUnreadSessionIds((current) =>
+							addUnreadSessionId(current, sessionId),
+						);
+					}
 				}
 			},
 		);

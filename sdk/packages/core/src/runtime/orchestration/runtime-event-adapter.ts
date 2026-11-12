@@ -231,7 +231,23 @@ export class RuntimeEventAdapter {
 			case "tool-started":
 				return this.translateToolStarted(event);
 			case "tool-call-delta":
-				return [];
+				if (!event.toolName) {
+					return [];
+				}
+				return [
+					{
+						type: "content_update",
+						contentType: "tool",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+						update: {
+							phase: "input_streaming",
+							...(event.inputPreview
+								? { inputPreview: event.inputPreview }
+								: {}),
+						},
+					},
+				];
 			case "tool-updated":
 				return [
 					{

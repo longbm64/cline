@@ -8,6 +8,7 @@
 /* Unlayered on purpose: its chat-polish rules must beat Streamdown's layered
  * Tailwind utilities (from the @source below) without !important. */
 @import "@cline/ui/components/markdown.css";
+@import "../styles/theme-presets.css";
 
 @source "../../node_modules/streamdown/dist";
 

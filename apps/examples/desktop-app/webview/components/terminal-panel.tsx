@@ -122,7 +122,13 @@ function TerminalPanelForCwd({
 		const observer = new MutationObserver(applyTerminalTheme);
 		observer.observe(document.documentElement, {
 			attributes: true,
-			attributeFilter: ["class", "data-cline-accent"],
+			attributeFilter: [
+				"class",
+				"data-cline-accent",
+				"data-cline-theme",
+				"data-cline-hub-theme",
+				"data-theme",
+			],
 		});
 		return () => observer.disconnect();
 	}, []);

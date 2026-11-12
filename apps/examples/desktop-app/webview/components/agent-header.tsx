@@ -7,6 +7,7 @@ import {
 	Check,
 	ChevronRight,
 	Clock3,
+	Columns2,
 	CornerUpLeft,
 	FileDiff,
 	FolderTree,
@@ -68,6 +69,9 @@ type AgentHeaderProps = {
 	agentsError?: string | null;
 	onAgentsOpenChange?: (open: boolean) => void;
 	onOpenAgentSession?: (agentSessionId: string) => void | Promise<void>;
+	/** Parallel subagent columns view state and toggle for multi-agent sessions. */
+	subagentColumnsOpen?: boolean;
+	onToggleSubagentColumns?: () => void;
 	/** Set when the open session is itself a child agent run. */
 	parentSession?: { sessionId: string; title?: string };
 	onOpenParentSession?: (parentSessionId: string) => void | Promise<void>;
@@ -101,6 +105,8 @@ function AgentHeaderImpl({
 	agentsError = null,
 	onAgentsOpenChange,
 	onOpenAgentSession,
+	subagentColumnsOpen = false,
+	onToggleSubagentColumns,
 	parentSession,
 	onOpenParentSession,
 	onToggleTerminal,
@@ -151,13 +157,39 @@ function AgentHeaderImpl({
 			actions={
 				showSessionActions ? (
 					<>
+						{agentActivity &&
+						agentActivity.total > 0 &&
+						onToggleSubagentColumns ? (
+							<Button
+								aria-label={
+									subagentColumnsOpen
+										? "Back to main chat"
+										: "View parallel agent columns"
+								}
+								aria-pressed={subagentColumnsOpen}
+								id="toggle-subagent-columns"
+								onClick={onToggleSubagentColumns}
+								size="icon-xs"
+								title={
+									subagentColumnsOpen
+										? "Back to main chat"
+										: "View parallel agent columns"
+								}
+								type="button"
+								variant="toolbar"
+							>
+								<Columns2 className="size-4" />
+							</Button>
+						) : null}
 						<AgentActivityStatus
 							activity={agentActivity}
 							agents={agents}
+							columnsOpen={subagentColumnsOpen}
 							error={agentsError}
 							loading={agentsLoading}
 							onOpenAgentSession={onOpenAgentSession}
 							onOpenChange={onAgentsOpenChange}
+							onToggleColumns={onToggleSubagentColumns}
 						/>
 						{/* "What did the agent do" and "browse or commit the repo" are
 						    separate questions, so each gets its own control. */}
@@ -395,15 +427,19 @@ function AgentActivityStatus({
 	agents,
 	loading = false,
 	error = null,
+	columnsOpen = false,
 	onOpenChange,
 	onOpenAgentSession,
+	onToggleColumns,
 }: {
 	activity?: SessionAgentActivity;
 	agents?: SessionAgentEntry[];
 	loading?: boolean;
 	error?: string | null;
+	columnsOpen?: boolean;
 	onOpenChange?: (open: boolean) => void;
 	onOpenAgentSession?: (agentSessionId: string) => void | Promise<void>;
+	onToggleColumns?: () => void;
 }) {
 	// Controlled so selecting an agent can dismiss the popover as the session view
 	// takes over; an uncontrolled one would linger over the newly opened session.
@@ -465,11 +501,29 @@ function AgentActivityStatus({
 				className="w-96 max-w-[calc(100vw-2rem)] overflow-hidden p-0"
 				id="agent-activity-panel"
 			>
-				<div className="border-b border-border/70 px-3 py-2">
-					<div className="text-sm font-medium text-foreground">Agents</div>
-					<div className="mt-0.5 text-[11px] text-muted-foreground">
-						{label}
+				<div className="flex items-start justify-between gap-2 border-b border-border/70 px-3 py-2">
+					<div className="min-w-0">
+						<div className="text-sm font-medium text-foreground">Agents</div>
+						<div className="mt-0.5 text-[11px] text-muted-foreground">
+							{label}
+						</div>
 					</div>
+					{onToggleColumns ? (
+						<Button
+							className="h-6 shrink-0 gap-1 px-2 text-xs"
+							id="agent-panel-toggle-columns"
+							onClick={() => {
+								handleOpenChange(false);
+								onToggleColumns();
+							}}
+							size="sm"
+							type="button"
+							variant="ghost"
+						>
+							<Columns2 aria-hidden="true" className="size-3" />
+							<span>{columnsOpen ? "Main chat" : "Parallel columns"}</span>
+						</Button>
+					) : null}
 				</div>
 				<AgentRoster
 					activity={activity}

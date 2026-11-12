@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { desktopClient } from "@/lib/desktop-client";
 import { agentEntryState, type SessionAgentEntry } from "@/lib/session-agents";
+import { isAppWindowFocused } from "@/lib/window-focus";
 
 /** While a turn runs, child agents come and go faster than a one-shot fetch sees. */
 const ACTIVE_POLL_INTERVAL_MS = 2500;
@@ -212,8 +213,17 @@ export function useSessionAgents({
 			return;
 		}
 		let polling = false;
+		let unfocusedTick = 0;
 		const timer = window.setInterval(() => {
-			if (polling) return;
+			if (polling || document.hidden) return;
+			if (!isAppWindowFocused()) {
+				unfocusedTick += 1;
+				if (unfocusedTick % 2 !== 0) {
+					return;
+				}
+			} else {
+				unfocusedTick = 0;
+			}
 			polling = true;
 			void refresh(sessionId, { quiet: true }).finally(() => {
 				polling = false;

@@ -35,8 +35,8 @@ export const AgentComposer = forwardRef<HTMLDivElement, AgentComposerProps>(
 					ref={ref}
 					className={clsx(
 						variant === "welcome"
-							? "overflow-visible rounded-cline-ui-xl border border-cline-ui-border/90 bg-cline-ui-surface-1/40 shadow-[0_24px_80px_-56px_color-mix(in_oklab,var(--primary)_72%,transparent)] backdrop-blur-md"
-							: "overflow-visible rounded-cline-ui-xl border border-cline-ui-border bg-cline-ui-surface-2 backdrop-blur-sm focus-within:border-cline-ui-primary/50 focus-within:ring-1 focus-within:ring-cline-ui-primary/20",
+							? "overflow-visible rounded-cline-ui-xl border border-cline-ui-border/90 bg-cline-ui-surface-1/90 shadow-[0_24px_80px_-56px_color-mix(in_oklab,var(--primary)_72%,transparent)]"
+							: "overflow-visible rounded-cline-ui-xl border border-cline-ui-border bg-cline-ui-surface-2 focus-within:border-cline-ui-primary/50 focus-within:ring-1 focus-within:ring-cline-ui-primary/20",
 						className,
 					)}
 				/>
@@ -135,7 +135,7 @@ export const AgentComposerTextarea = forwardRef<
 	return (
 		<div
 			className={clsx(
-				"relative flex min-w-0 flex-1",
+				"relative flex min-w-0 flex-1 [contain:layout_style]",
 				variant === "welcome" && "self-start",
 			)}
 		>
@@ -184,7 +184,9 @@ export const AgentComposerTextarea = forwardRef<
 					if (token) textarea.setSelectionRange(token.start, token.end);
 				}}
 				onScroll={(event) => {
-					setScrollTop(event.currentTarget.scrollTop);
+					if (highlights && highlights.length > 0) {
+						setScrollTop(event.currentTarget.scrollTop);
+					}
 					onScroll?.(event);
 				}}
 				className={clsx(
