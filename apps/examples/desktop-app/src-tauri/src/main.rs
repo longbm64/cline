@@ -97,6 +97,7 @@ struct TrayMenuState {
 
 #[derive(Clone)]
 struct AppContext {
+    product_name: String,
     launch_cwd: String,
     workspace_root: String,
     resource_dir: PathBuf,
@@ -492,6 +493,11 @@ fn desktop_app_bin_dir(context: &AppContext) -> PathBuf {
         .join("bin")
 }
 
+#[cfg(target_os = "windows")]
+fn windows_installed_app_dir(product_name: &str) -> Option<PathBuf> {
+    non_empty_env_path("LOCALAPPDATA").map(|dir| dir.join(product_name))
+}
+
 fn resolve_desktop_cli_path(context: &AppContext) -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok();
     let mut candidates = Vec::new();
@@ -506,6 +512,10 @@ fn resolve_desktop_cli_path(context: &AppContext) -> Option<PathBuf> {
             candidates.push(path);
         }
         candidates.push(desktop_app_bin_dir(context).join(&binary_name));
+        #[cfg(target_os = "windows")]
+        if let Some(installed_dir) = windows_installed_app_dir(&context.product_name) {
+            candidates.push(installed_dir.join(&binary_name));
+        }
     }
     candidates.into_iter().find(|path| path.is_file())
 }
@@ -528,6 +538,10 @@ fn resolve_desktop_backend_bundle_path(context: &AppContext) -> Option<PathBuf> 
             .join("desktop-backend")
             .join("index.js"),
     );
+    #[cfg(target_os = "windows")]
+    if let Some(installed_dir) = windows_installed_app_dir(&context.product_name) {
+        candidates.extend(desktop_backend_bundle_candidates(&installed_dir));
+    }
     candidates.into_iter().find(|path| path.is_file())
 }
 
@@ -563,13 +577,16 @@ fn spawn_desktop_backend_process(context: &AppContext) -> Result<Child, String> 
         if let Some(bundle_dir) = bundle_path.parent() {
             command.current_dir(bundle_dir);
         }
+        let remote_helpers_dir = bundle_path
+            .parent()
+            .and_then(Path::parent)
+            .map(|bin_dir| bin_dir.join("remote-helpers"))
+            .filter(|dir| dir.exists())
+            .unwrap_or_else(|| context.resource_dir.join("bin").join("remote-helpers"));
         command
             .env("BUN_BE_BUN", "1")
             .env("CLINE_DESKTOP_WORKSPACE_ROOT", &context.workspace_root)
-            .env(
-                "CLINE_REMOTE_HELPER_DIRECTORY",
-                context.resource_dir.join("bin").join("remote-helpers"),
-            );
+            .env("CLINE_REMOTE_HELPER_DIRECTORY", remote_helpers_dir);
         command
     } else {
         return Err(format!(
@@ -1230,6 +1247,9 @@ async fn open_project_window(
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
 
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false).shadow(true);
+
     let window = builder
         .build()
         .map_err(|error| format!("failed opening project window: {error}"))?;
@@ -1701,6 +1721,7 @@ fn main() {
         .manage(terminal::TerminalState::default())
         .setup(move |app| {
             app.manage(AppContext {
+                product_name: app.package_info().name.clone(),
                 launch_cwd: launch_cwd.clone(),
                 workspace_root: workspace_root.clone(),
                 resource_dir: app.path().resource_dir()?,
@@ -2381,5 +2402,52 @@ mod tests {
             .expect("startup check should succeed");
         assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
         state.stop();
+    }
+}
+
+#[cfg(test)]
+mod cross_platform_tests {
+    use super::*;
+
+    #[test]
+    fn project_window_label_is_stable_across_trailing_slashes() {
+        assert_eq!(
+            project_window_label("C:\\Users\\demo\\project\\"),
+            project_window_label("C:\\Users\\demo\\project")
+        );
+        assert!(project_window_label("C:\\Users\\demo\\project").starts_with("project-"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_resolves_installed_localappdata_runtime_when_exe_is_relocated() {
+        let temp = std::env::temp_dir().join(format!("cline-win-fallback-{}", std::process::id()));
+        let product_name = "ClineTestProduct";
+        let installed_dir = temp.join(product_name);
+        let backend_dir = installed_dir.join("bin").join("desktop-backend");
+        fs::create_dir_all(&backend_dir).expect("create test backend dir");
+        let cli_file = installed_dir.join("cline-cli.exe");
+        let bundle_file = backend_dir.join("index.js");
+        fs::write(&cli_file, b"cli").expect("write test cli");
+        fs::write(&bundle_file, b"bundle").expect("write test bundle");
+
+        let previous = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &temp);
+        let context = AppContext {
+            product_name: product_name.to_string(),
+            launch_cwd: temp.to_string_lossy().to_string(),
+            workspace_root: temp.to_string_lossy().to_string(),
+            resource_dir: temp.join("relocated-desktop"),
+        };
+        let resolved_cli = resolve_desktop_cli_path(&context);
+        let resolved_bundle = resolve_desktop_backend_bundle_path(&context);
+        match previous {
+            Some(val) => std::env::set_var("LOCALAPPDATA", val),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(resolved_cli.as_deref(), Some(cli_file.as_path()));
+        assert_eq!(resolved_bundle.as_deref(), Some(bundle_file.as_path()));
     }
 }
