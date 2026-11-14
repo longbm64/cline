@@ -3098,6 +3098,47 @@ describe("AgentRuntime", () => {
 		);
 	});
 
+	it("forwards configured cwd into tool execution context", async () => {
+		const executeTool = vi.fn(async () => "ok");
+		const model = new ScriptedModel([
+			() => [
+				{
+					type: "tool-call-delta",
+					toolCallId: "call_cwd",
+					toolName: "inspect_cwd",
+					inputText: "{}",
+				},
+				{ type: "finish", reason: "tool-calls" },
+			],
+			() => [
+				{ type: "text-delta", text: "done" },
+				{ type: "finish", reason: "stop" },
+			],
+		]);
+		const runtime = new AgentRuntime({
+			model,
+			cwd: "/workspace/demo",
+			tools: [
+				{
+					name: "inspect_cwd",
+					description: "Inspect cwd",
+					inputSchema: { type: "object", properties: {} },
+					execute: executeTool,
+				},
+			],
+		});
+
+		const result = await runtime.run("Start");
+
+		expect(result.status).toBe("completed");
+		expect(executeTool).toHaveBeenCalledWith(
+			{},
+			expect.objectContaining({
+				cwd: "/workspace/demo",
+			}),
+		);
+	});
+
 	it("treats an unset maxIterations as unlimited", async () => {
 		const model = new ScriptedModel([
 			() => [

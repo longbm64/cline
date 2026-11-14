@@ -40,6 +40,7 @@ export interface CreateAgentRuntimeConfigInput {
 	 * event routing, persistence, and approval delivery.
 	 */
 	readonly sessionId?: string;
+	readonly cwd?: string;
 	readonly agentId: string;
 	/**
 	 * Agent conversation/transcript identifier used by tools, hooks, telemetry,
@@ -104,6 +105,7 @@ export function createAgentRuntimeConfig(
 		clientVersion: agentConfig.extensionContext?.client?.version,
 		clineCoreVersion,
 		sessionId: input.sessionId ?? agentConfig.sessionId,
+		cwd: input.cwd ?? agentConfig.cwd,
 		agentId: input.agentId,
 		conversationId: input.conversationId,
 		parentAgentId: input.parentAgentId,

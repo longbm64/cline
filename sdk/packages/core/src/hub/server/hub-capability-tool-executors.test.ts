@@ -213,6 +213,7 @@ describe("hub capability custom tools", () => {
 			["Yes"],
 			{
 				sessionId: "session-1",
+				cwd: "/workspace/project",
 				agentId: "agent-1",
 				conversationId: "conv-1",
 				runId: "run-1",
@@ -230,6 +231,7 @@ describe("hub capability custom tools", () => {
 			expect.objectContaining({
 				context: expect.objectContaining({
 					sessionId: "session-1",
+					cwd: "/workspace/project",
 					runId: "run-1",
 					toolCallId: "call-1",
 				}),

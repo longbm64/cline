@@ -943,6 +943,7 @@ describe("HubRuntimeHost", () => {
 					args: ["Which approach?", ["Use the SDK", "Write custom code"]],
 					context: {
 						sessionId: "sess-1",
+						cwd: "/workspace/project",
 						agentId: "agent-1",
 						conversationId: "conversation-1",
 						iteration: 1,
@@ -957,6 +958,7 @@ describe("HubRuntimeHost", () => {
 			["Use the SDK", "Write custom code"],
 			expect.objectContaining({
 				sessionId: "sess-1",
+				cwd: "/workspace/project",
 				agentId: "agent-1",
 				conversationId: "conversation-1",
 				iteration: 1,

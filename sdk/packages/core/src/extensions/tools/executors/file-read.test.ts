@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	prepareToolResultRecovery,
 	TOOL_RESULT_CACHE_MISS,
@@ -92,6 +92,85 @@ describe("createFileReadExecutor", () => {
 	it("reads a file from an absolute path", async () => {
 		const result = await readTempFile("hello absolute path");
 		expect(result).toBe("1 | hello absolute path");
+	});
+
+	it("resolves relative paths against options.cwd instead of process.cwd()", async () => {
+		const workspaceDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "agents-file-read-options-cwd-"),
+		);
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue("/");
+		try {
+			await fs.mkdir(path.join(workspaceDir, "lib/features"), {
+				recursive: true,
+			});
+			await fs.writeFile(
+				path.join(workspaceDir, "lib/features/screen.dart"),
+				"line1\nline2\n",
+				"utf-8",
+			);
+			const readFile = createFileReadExecutor({ cwd: workspaceDir });
+			const result = await readFile(
+				{ path: "lib/features/screen.dart", start_line: 1, end_line: 2 },
+				{ agentId: "agent-1", conversationId: "conv-1", iteration: 1 },
+			);
+			expect(result).toBe("1 | line1\n2 | line2");
+		} finally {
+			cwdSpy.mockRestore();
+			await fs.rm(workspaceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers context.cwd over options.cwd and process.cwd() for relative paths", async () => {
+		const optionDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "agents-file-read-opt-"),
+		);
+		const contextDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "agents-file-read-ctx-"),
+		);
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue("/");
+		try {
+			await fs.writeFile(
+				path.join(optionDir, "note.txt"),
+				"from options",
+				"utf-8",
+			);
+			await fs.writeFile(
+				path.join(contextDir, "note.txt"),
+				"from context",
+				"utf-8",
+			);
+			const readFile = createFileReadExecutor({ cwd: optionDir });
+			const result = await readFile(
+				{ path: "note.txt" },
+				{
+					agentId: "agent-1",
+					conversationId: "conv-1",
+					iteration: 1,
+					cwd: contextDir,
+				},
+			);
+			expect(result).toBe("1 | from context");
+		} finally {
+			cwdSpy.mockRestore();
+			await fs.rm(optionDir, { recursive: true, force: true });
+			await fs.rm(contextDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps cline:// cache URIs independent of options.cwd and context.cwd", async () => {
+		const cache = new ToolResultCache("session");
+		const uri = cache.store("call", "cached line 1\ncached line 2") ?? "";
+		const readFile = createFileReadExecutor({ cwd: "/nonexistent/workspace" });
+		const result = await readFile(
+			{ path: uri, start_line: 1, end_line: 2 },
+			{
+				agentId: "agent-1",
+				iteration: 1,
+				cwd: "/also/nonexistent",
+				metadata: { toolResultCache: cache },
+			},
+		);
+		expect(result).toBe("1 | cached line 1\n2 | cached line 2");
 	});
 
 	it("returns only the requested inclusive line range", async () => {

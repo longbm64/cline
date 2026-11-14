@@ -568,6 +568,8 @@ export interface AgentRuntimeConfig {
 	 * tracks the agent transcript.
 	 */
 	sessionId?: string;
+	/** Working directory passed into AgentToolContext when tools execute. */
+	cwd?: string;
 	agentId?: string;
 	/**
 	 * Agent conversation/transcript identifier.

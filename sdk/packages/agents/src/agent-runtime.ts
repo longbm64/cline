@@ -2614,6 +2614,7 @@ export class AgentRuntime {
 			try {
 				const output = await prepared.tool.execute(prepared.input, {
 					sessionId: this.config.sessionId,
+					cwd: this.config.cwd,
 					agentId: this.state.agentId,
 					conversationId: this.config.conversationId,
 					runId: this.state.runId ?? createUID("run"),

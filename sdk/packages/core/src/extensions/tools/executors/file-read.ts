@@ -36,6 +36,13 @@ const IMAGE_MEDIA_TYPES = new Map<string, string>([
  */
 export interface FileReadExecutorOptions {
 	/**
+	 * Working directory used to resolve relative file paths when the tool
+	 * context does not specify `cwd`.
+	 * @default process.cwd() at read time
+	 */
+	cwd?: string;
+
+	/**
 	 * Maximum file size to read in bytes
 	 * @default 10_000_000 (10MB)
 	 */
@@ -54,7 +61,9 @@ export interface FileReadExecutorOptions {
 	includeLineNumbers?: boolean;
 }
 
-const DEFAULT_FILE_READ_OPTIONS: Required<FileReadExecutorOptions> = {
+const DEFAULT_FILE_READ_OPTIONS: Required<
+	Omit<FileReadExecutorOptions, "cwd">
+> = {
 	maxFileSizeBytes: 10_000_000, // 10MB default limit
 	encoding: "utf-8", // Default to UTF-8 encoding
 	includeLineNumbers: true, // Include line numbers by default
@@ -208,10 +217,16 @@ async function readTextWindow(
 export function createFileReadExecutor(
 	options: FileReadExecutorOptions = {},
 ): FileReadExecutor {
-	const { maxFileSizeBytes, encoding, includeLineNumbers } = {
+	const {
+		cwd: optionCwd,
+		maxFileSizeBytes,
+		encoding,
+		includeLineNumbers,
+	} = {
 		...DEFAULT_FILE_READ_OPTIONS,
 		...options,
 	};
+	const defaultCwd = optionCwd?.trim() || undefined;
 
 	return async (request: ReadFileRequest, context: AgentToolContext) => {
 		const { path: filePath, start_line, end_line } = request;
@@ -228,9 +243,12 @@ export function createFileReadExecutor(
 				context.signal,
 			);
 		}
+		// Resolve relative paths against the session/tool workspace instead of
+		// process.cwd(), which in GUI apps and background daemons is often "/".
+		const baseCwd = context?.cwd?.trim() || defaultCwd || process.cwd();
 		const initialPath = path.isAbsolute(filePath)
 			? path.normalize(filePath)
-			: path.resolve(process.cwd(), filePath);
+			: path.resolve(baseCwd, filePath);
 		// Tolerate Unicode-whitespace mismatches (e.g. macOS Sonoma+
 		// screenshot paths where the on-disk filename contains U+202F but
 		// the caller's string has a regular space).

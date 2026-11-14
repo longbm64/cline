@@ -208,6 +208,14 @@ export function createBuiltinTools(
 		getDefaultShell(process.platform);
 	const resolvedExecutorOptions: DefaultExecutorsOptions = {
 		...executorOptions,
+		...(toolsConfig.cwd
+			? {
+					fileRead: {
+						cwd: toolsConfig.cwd,
+						...executorOptions.fileRead,
+					},
+				}
+			: {}),
 		bash: {
 			...executorOptions.bash,
 			shell,

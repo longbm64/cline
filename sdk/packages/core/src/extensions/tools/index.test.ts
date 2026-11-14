@@ -114,4 +114,58 @@ describe("createBuiltinTools shell configuration", () => {
 			expect.any(Object),
 		);
 	});
+
+	it("wires cwd into built-in read_files for relative paths when process.cwd() differs", async () => {
+		const fs = await import("node:fs/promises");
+		const os = await import("node:os");
+		const path = await import("node:path");
+		const workspaceDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "builtin-read-files-cwd-"),
+		);
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue("/");
+		try {
+			await fs.mkdir(path.join(workspaceDir, "lib/features/email"), {
+				recursive: true,
+			});
+			await fs.writeFile(
+				path.join(
+					workspaceDir,
+					"lib/features/email/email_management_screen.dart",
+				),
+				"class EmailManagementScreen {}\n",
+				"utf-8",
+			);
+
+			const readFilesTool = createBuiltinTools({
+				cwd: workspaceDir,
+				enableSearch: false,
+				enableBash: false,
+				enableWebFetch: false,
+				enableEditor: false,
+				enableSkills: false,
+				enableAskQuestion: false,
+			}).find((tool) => tool.name === "read_files");
+			if (!readFilesTool) {
+				throw new Error("Expected read_files tool");
+			}
+
+			const result = await readFilesTool.execute(
+				{
+					files: [{ path: "lib/features/email/email_management_screen.dart" }],
+				},
+				context,
+			);
+
+			expect(result).toEqual([
+				{
+					query: "lib/features/email/email_management_screen.dart",
+					result: "1 | class EmailManagementScreen {}",
+					success: true,
+				},
+			]);
+		} finally {
+			cwdSpy.mockRestore();
+			await fs.rm(workspaceDir, { recursive: true, force: true });
+		}
+	});
 });

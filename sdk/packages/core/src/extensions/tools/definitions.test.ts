@@ -1874,6 +1874,87 @@ describe("default read_files tool", () => {
 			}),
 		);
 	});
+
+	it("passes configured cwd through context to the executor even when process.cwd() differs", async () => {
+		const fs = await import("node:fs/promises");
+		const os = await import("node:os");
+		const path = await import("node:path");
+		const { createFileReadExecutor } = await import("./executors/file-read");
+
+		const workspaceDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "read-files-tool-cwd-"),
+		);
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue("/");
+		try {
+			await fs.mkdir(path.join(workspaceDir, "src"), { recursive: true });
+			await fs.writeFile(
+				path.join(workspaceDir, "src", "main.ts"),
+				"export const answer = 42;\n",
+				"utf-8",
+			);
+
+			const tools = createDefaultTools({
+				cwd: workspaceDir,
+				executors: { readFile: createFileReadExecutor() },
+				enableSearch: false,
+				enableBash: false,
+				enableWebFetch: false,
+				enableEditor: false,
+				enableSkills: false,
+				enableAskQuestion: false,
+			});
+			const readFilesTool = tools.find((tool) => tool.name === "read_files");
+			if (!readFilesTool) {
+				throw new Error("Expected read_files tool to be defined.");
+			}
+
+			const result = (await readFilesTool.execute(
+				{ files: [{ path: "src/main.ts", start_line: 1, end_line: 1 }] },
+				{
+					agentId: "agent-1",
+					conversationId: "conv-1",
+					iteration: 1,
+				},
+			)) as Array<{
+				query: string;
+				result: string;
+				success: boolean;
+			}>;
+
+			expect(result).toEqual([
+				{
+					query: "src/main.ts:1-1",
+					result: "1 | export const answer = 42;",
+					success: true,
+				},
+			]);
+		} finally {
+			cwdSpy.mockRestore();
+			await fs.rm(workspaceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers context.cwd over configured config.cwd when executing read_files", async () => {
+		const execute = vi.fn(async () => "ok");
+		const tool = createReadFilesTool(execute, { cwd: "/configured/workspace" });
+
+		await tool.execute(
+			{ files: [{ path: "src/app.ts" }] },
+			{
+				agentId: "agent-1",
+				conversationId: "conv-1",
+				iteration: 1,
+				cwd: "/override/workspace",
+			},
+		);
+
+		expect(execute).toHaveBeenCalledWith(
+			{ path: "src/app.ts" },
+			expect.objectContaining({
+				cwd: "/override/workspace",
+			}),
+		);
+	});
 });
 
 describe("zod schema conversion", () => {
@@ -1906,7 +1987,7 @@ describe("zod schema conversion", () => {
 					path: {
 						type: "string",
 						description:
-							"The absolute path of a text file to read content from",
+							"The path of a text or image file to read content from (absolute path, or relative to the working directory)",
 					},
 					start_line: {
 						anyOf: [{ type: "integer" }, { type: "null" }],

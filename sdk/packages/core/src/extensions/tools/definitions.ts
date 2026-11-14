@@ -267,14 +267,15 @@ async function executeShellCommands(
  */
 export function createReadFilesTool(
 	executor: FileReadExecutor,
-	config: Pick<DefaultToolsConfig, "fileReadTimeoutMs"> = {},
+	config: Pick<DefaultToolsConfig, "cwd" | "fileReadTimeoutMs"> = {},
 ): AgentTool<ReadFilesInput, ToolOperationResult[]> {
 	const timeoutMs = config.fileReadTimeoutMs ?? 10000;
+	const defaultCwd = config.cwd?.trim() || undefined;
 
 	return createTool<ReadFilesInput, ToolOperationResult[]>({
 		name: "read_files",
 		description:
-			"Read the content of text or image files at the provided absolute paths, or return only an inclusive one-based line range when start_line/end_line are provided on the same file entry as its path. " +
+			"Read the content of text or image files at the provided paths (absolute or relative to the working directory), or return only an inclusive one-based line range when start_line/end_line are provided on the same file entry as its path. " +
 			"When you already know multiple files you need, read them together in one call, and call this tool in the same response as other independent tool calls. " +
 			`Each read returns at most ${MAX_READ_LINES} lines / ~${Math.round(MAX_READ_OUTPUT_CHARS / 1024)}k characters; longer files report their total line count, page through them with start_line/end_line on that file's entry. ` +
 			"Binary files that are not image and large files are not supported. " +
@@ -318,6 +319,14 @@ export function createReadFilesTool(
 				requests = [validate];
 			}
 
+			// Prefer runtime-supplied context.cwd (e.g. plugin or session override),
+			// then the tool's configured cwd, falling back to process.cwd() dynamically.
+			const resolvedCwd = context.cwd?.trim() || defaultCwd || process.cwd();
+			const executorContext =
+				context.cwd === resolvedCwd
+					? context
+					: { ...context, cwd: resolvedCwd };
+
 			return Promise.all(
 				requests.map(async (request): Promise<ToolOperationResult> => {
 					const rangeError = getReadFileRangeError(request);
@@ -332,7 +341,7 @@ export function createReadFilesTool(
 
 					try {
 						const content = await withTimeout(
-							executor(request, context),
+							executor(request, executorContext),
 							timeoutMs,
 							`File read timed out after ${timeoutMs}ms`,
 						);

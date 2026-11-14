@@ -306,4 +306,21 @@ describe("createAgentRuntimeConfig", () => {
 		expect(runtimeConfig.plugins).toHaveLength(1);
 		expect(runtimeConfig.initialMessages).toHaveLength(1);
 	});
+
+	it("forwards cwd from agentConfig or explicit input", () => {
+		const fromAgent = createAgentRuntimeConfig({
+			agentConfig: makeAgentConfig({ cwd: "/repo/from-agent" }),
+			agentId: "a",
+			model: nullModel,
+		});
+		expect(fromAgent.cwd).toBe("/repo/from-agent");
+
+		const fromInput = createAgentRuntimeConfig({
+			agentConfig: makeAgentConfig({ cwd: "/repo/from-agent" }),
+			cwd: "/repo/override",
+			agentId: "a",
+			model: nullModel,
+		});
+		expect(fromInput.cwd).toBe("/repo/override");
+	});
 });

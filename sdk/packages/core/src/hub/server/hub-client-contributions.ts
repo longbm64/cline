@@ -246,6 +246,7 @@ function serializeToolContext(
 	const metadata = context.metadata ? { ...context.metadata } : undefined;
 	return {
 		sessionId: context.sessionId,
+		cwd: context.cwd,
 		agentId: context.agentId,
 		conversationId: context.conversationId,
 		runId: context.runId,

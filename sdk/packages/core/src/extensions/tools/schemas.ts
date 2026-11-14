@@ -14,7 +14,9 @@ export const INPUT_ARG_CHAR_LIMIT = 6000;
  */
 const AbsolutePath = z
 	.string()
-	.describe("The absolute path of a text file to read content from");
+	.describe(
+		"The path of a text or image file to read content from (absolute path, or relative to the working directory)",
+	);
 
 export const ReadFileLineRangeSchema = z
 	.object({

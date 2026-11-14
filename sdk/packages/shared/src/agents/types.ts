@@ -704,6 +704,10 @@ export interface AgentConfig {
 	 * model transcript managed by the agent runtime.
 	 */
 	sessionId?: string;
+	/**
+	 * Working directory for resolving relative paths during tool execution.
+	 */
+	cwd?: string;
 	// -------------------------------------------------------------------------
 	// Provider Settings
 	// -------------------------------------------------------------------------
@@ -924,6 +928,7 @@ export interface AgentConfig {
 export const AgentConfigSchema = z.object({
 	distinctId: z.string().optional(),
 	sessionId: z.string().optional(),
+	cwd: z.string().optional(),
 	// Provider Settings
 	providerId: z.string(),
 	modelId: z.string(),
