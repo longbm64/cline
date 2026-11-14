@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import nodePath, { dirname } from "node:path";
 import {
 	getUserRunSpan,
@@ -16,7 +23,11 @@ import {
 	sharedSessionMessagesWritePath,
 } from "../paths";
 import type { JsonRecord, SidecarContext } from "../types";
-import { readChildSessionMessages } from "./agents";
+import {
+	readChildSessionMessages,
+	readChildSessionMessagesAsync,
+} from "./agents";
+import { readSessionHooks } from "./artifacts";
 import {
 	parseF64Value,
 	parseU64Value,
@@ -177,22 +188,113 @@ function extractImageBlock(
 		: undefined;
 }
 
+type CachedPersistedMessages = {
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	ino: number;
+	messages: MessageWithMetadata[];
+};
+
+const MAX_CACHED_PERSISTED_TRANSCRIPTS = 64;
+const persistedMessagesCache = new Map<string, CachedPersistedMessages>();
+
+function parsePersistedMessagesJson(raw: string): MessageWithMetadata[] {
+	const parsed = JSON.parse(raw) as
+		| { messages?: MessageWithMetadata[] }
+		| MessageWithMetadata[];
+	if (Array.isArray(parsed)) {
+		return parsed;
+	}
+	return Array.isArray(parsed.messages) ? parsed.messages : [];
+}
+
+function getCachedPersistedMessages(
+	path: string,
+	stats: { size: number; mtimeMs: number; ctimeMs: number; ino: number },
+): MessageWithMetadata[] | null {
+	const cached = persistedMessagesCache.get(path);
+	if (
+		!cached ||
+		cached.size !== stats.size ||
+		cached.mtimeMs !== stats.mtimeMs ||
+		cached.ctimeMs !== stats.ctimeMs ||
+		cached.ino !== stats.ino
+	) {
+		return null;
+	}
+	// Refresh insertion order for simple LRU eviction.
+	persistedMessagesCache.delete(path);
+	persistedMessagesCache.set(path, cached);
+	return cached.messages;
+}
+
+function setCachedPersistedMessages(
+	path: string,
+	stats: { size: number; mtimeMs: number; ctimeMs: number; ino: number },
+	messages: MessageWithMetadata[],
+): void {
+	if (persistedMessagesCache.has(path)) {
+		persistedMessagesCache.delete(path);
+	} else if (persistedMessagesCache.size >= MAX_CACHED_PERSISTED_TRANSCRIPTS) {
+		const oldestKey = persistedMessagesCache.keys().next().value;
+		if (oldestKey !== undefined) {
+			persistedMessagesCache.delete(oldestKey);
+		}
+	}
+	persistedMessagesCache.set(path, {
+		size: stats.size,
+		mtimeMs: stats.mtimeMs,
+		ctimeMs: stats.ctimeMs,
+		ino: stats.ino,
+		messages,
+	});
+}
+
+function invalidatePersistedMessagesCache(sessionId: string): void {
+	persistedMessagesCache.delete(sharedSessionMessagesWritePath(sessionId));
+	persistedMessagesCache.delete(sharedSessionMessagesPath(sessionId));
+}
+
 export function readPersistedChatMessages(
 	sessionId: string,
 ): MessageWithMetadata[] | null {
 	const path = sharedSessionMessagesPath(sessionId);
 	if (!existsSync(path)) {
+		persistedMessagesCache.delete(path);
 		return null;
 	}
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as
-			| { messages?: MessageWithMetadata[] }
-			| MessageWithMetadata[];
-		if (Array.isArray(parsed)) {
-			return parsed;
+		const stats = statSync(path);
+		const cached = getCachedPersistedMessages(path, stats);
+		if (cached) {
+			return cached;
 		}
-		return Array.isArray(parsed.messages) ? parsed.messages : [];
+		const messages = parsePersistedMessagesJson(readFileSync(path, "utf8"));
+		setCachedPersistedMessages(path, stats, messages);
+		return messages;
 	} catch {
+		persistedMessagesCache.delete(path);
+		return null;
+	}
+}
+
+export async function readPersistedChatMessagesAsync(
+	sessionId: string,
+): Promise<MessageWithMetadata[] | null> {
+	const path = sharedSessionMessagesPath(sessionId);
+	try {
+		const stats = await stat(path);
+		const cached = getCachedPersistedMessages(path, stats);
+		if (cached) {
+			return cached;
+		}
+		const raw = await readFile(path, "utf8");
+		const messages = parsePersistedMessagesJson(raw);
+		setCachedPersistedMessages(path, stats, messages);
+		return messages;
+	} catch {
+		persistedMessagesCache.delete(path);
 		return null;
 	}
 }
@@ -357,29 +459,13 @@ function readCheckpointEntriesByRunCount(
 	return entries;
 }
 
-export function readSessionMessagesSync(
-	ctx: Pick<SidecarContext, "liveSessions">,
+function formatSessionMessagesForDisplay(
 	sessionId: string,
-	maxMessages = 800,
-	/** Explicit authoritative source for remote sessions; bypasses local disk. */
-	sourceMessages?: unknown[],
-	/** Where a remote session resolved `@` mentions (its workspace root). */
+	messages: MessageWithMetadata[],
+	maxMessages: number,
+	isRemoteRead: boolean,
 	remoteMentionBaseDir?: string,
 ): unknown[] {
-	const isRemoteRead = sourceMessages !== undefined;
-	const persisted = isRemoteRead
-		? (sourceMessages as MessageWithMetadata[])
-		: (readPersistedChatMessages(sessionId) ??
-			// A child agent's transcript is not stored under its own session
-			// directory — it lives beside the root session's artifacts — so opening a
-			// subagent session has to resolve the path recorded on its row.
-			readChildSessionMessages(sessionId));
-	const messages =
-		persisted && persisted.length > 0
-			? persisted
-			: isRemoteRead
-				? []
-				: (ctx.liveSessions.get(sessionId)?.messages ?? []);
 	const max = Math.max(1, maxMessages);
 	const start = Math.max(0, messages.length - max);
 	const displayMessages = projectSessionMessagesForDisplay(
@@ -787,9 +873,60 @@ export function persistSessionMessages(
 			2,
 		),
 	);
+	invalidatePersistedMessagesCache(sessionId);
 }
 
-/** Async compatibility for existing sidecar callers. */
+async function resolveRawSessionMessagesAsync(
+	ctx: Pick<SidecarContext, "liveSessions">,
+	sessionId: string,
+	sourceMessages?: unknown[],
+): Promise<MessageWithMetadata[]> {
+	const isRemoteRead = sourceMessages !== undefined;
+	const persisted = isRemoteRead
+		? (sourceMessages as MessageWithMetadata[])
+		: ((await readPersistedChatMessagesAsync(sessionId)) ??
+			// A child agent's transcript is not stored under its own session
+			// directory — it lives beside the root session's artifacts — so opening a
+			// subagent session has to resolve the path recorded on its row.
+			(await readChildSessionMessagesAsync(sessionId)));
+	if (persisted && persisted.length > 0) {
+		return persisted;
+	}
+	return isRemoteRead ? [] : (ctx.liveSessions.get(sessionId)?.messages ?? []);
+}
+
+export function readSessionMessagesSync(
+	ctx: Pick<SidecarContext, "liveSessions">,
+	sessionId: string,
+	maxMessages = 800,
+	/** Explicit authoritative source for remote sessions; bypasses local disk. */
+	sourceMessages?: unknown[],
+	/** Where a remote session resolved `@` mentions (its workspace root). */
+	remoteMentionBaseDir?: string,
+): unknown[] {
+	const isRemoteRead = sourceMessages !== undefined;
+	const persisted = isRemoteRead
+		? (sourceMessages as MessageWithMetadata[])
+		: (readPersistedChatMessages(sessionId) ??
+			// A child agent's transcript is not stored under its own session
+			// directory — it lives beside the root session's artifacts — so opening a
+			// subagent session has to resolve the path recorded on its row.
+			readChildSessionMessages(sessionId));
+	const messages =
+		persisted && persisted.length > 0
+			? persisted
+			: isRemoteRead
+				? []
+				: (ctx.liveSessions.get(sessionId)?.messages ?? []);
+	return formatSessionMessagesForDisplay(
+		sessionId,
+		messages,
+		maxMessages,
+		isRemoteRead,
+		remoteMentionBaseDir,
+	);
+}
+
 export async function readSessionMessages(
 	ctx: Pick<SidecarContext, "liveSessions">,
 	sessionId: string,
@@ -797,11 +934,106 @@ export async function readSessionMessages(
 	sourceMessages?: unknown[],
 	remoteMentionBaseDir?: string,
 ): Promise<unknown[]> {
-	return readSessionMessagesSync(
+	const isRemoteRead = sourceMessages !== undefined;
+	const messages = await resolveRawSessionMessagesAsync(
 		ctx,
 		sessionId,
-		maxMessages,
 		sourceMessages,
+	);
+	return formatSessionMessagesForDisplay(
+		sessionId,
+		messages,
+		maxMessages,
+		isRemoteRead,
 		remoteMentionBaseDir,
 	);
+}
+
+export type SessionUsageSummary = {
+	inputTokens: number;
+	outputTokens: number;
+	totalCostUsd: number;
+};
+
+/**
+ * Computes token/cost usage totals without projecting every tool block,
+ * checkpoint, or mention chip over WebSocket.
+ */
+export async function readSessionUsageSummary(
+	ctx: Pick<SidecarContext, "liveSessions">,
+	sessionId: string,
+	maxMessages = 1200,
+	sourceMessages?: unknown[],
+): Promise<SessionUsageSummary> {
+	const isRemoteRead = sourceMessages !== undefined;
+	const messages = await resolveRawSessionMessagesAsync(
+		ctx,
+		sessionId,
+		sourceMessages,
+	);
+	const max = Math.max(1, maxMessages);
+	const start = Math.max(0, messages.length - max);
+	const projected = projectSessionMessagesForDisplay(messages.slice(start));
+
+	let inputTokens = 0;
+	let outputTokens = 0;
+	let totalCostUsd = 0;
+	let hasUsage = false;
+
+	for (const entry of projected) {
+		const rawMessage = entry.message;
+		if (!rawMessage || typeof rawMessage !== "object") {
+			continue;
+		}
+		const message = rawMessage as unknown as JsonRecord;
+		const metadata = readMessageMetadata(message);
+		const role = resolveMessageDisplayRole({
+			role: normalizeRole(message.role),
+			metadata,
+		});
+		if (role === "system" && typeof metadata?.kind !== "string") {
+			continue;
+		}
+		const usage = extractMessageUsageMeta(message);
+		if (!usage) {
+			continue;
+		}
+		if (typeof usage.inputTokens === "number") {
+			inputTokens += usage.inputTokens;
+			hasUsage = true;
+		}
+		if (typeof usage.outputTokens === "number") {
+			outputTokens += usage.outputTokens;
+			hasUsage = true;
+		}
+		if (typeof usage.totalCost === "number") {
+			totalCostUsd += usage.totalCost;
+			hasUsage = true;
+		}
+	}
+
+	if (!hasUsage && !isRemoteRead) {
+		const events = await readSessionHooks(sessionId, max);
+		for (const event of events) {
+			if (!event || typeof event !== "object") {
+				continue;
+			}
+			const record = event as JsonRecord;
+			if (typeof record.inputTokens === "number") {
+				inputTokens += record.inputTokens;
+			}
+			if (typeof record.outputTokens === "number") {
+				outputTokens += record.outputTokens;
+			}
+			if (typeof record.totalCost === "number") {
+				totalCostUsd += record.totalCost;
+			}
+		}
+	}
+
+	return {
+		inputTokens,
+		outputTokens,
+		totalCostUsd,
+	};
 }

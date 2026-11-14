@@ -50,6 +50,7 @@ export function sumChanges(files: readonly SessionChangeFile[]): {
 }
 
 const REFRESH_DEBOUNCE_MS = 400;
+const RUNNING_HIDDEN_REFRESH_DEBOUNCE_MS = 2_500;
 
 /**
  * Last-turn and whole-session changes for a local session, refetched whenever
@@ -65,28 +66,42 @@ export function useSessionChanges({
 	sessionId,
 	cwd,
 	refreshKey,
+	isRunning = false,
+	changesPanelOpen = false,
 }: {
 	enabled: boolean;
 	environmentId: string;
 	sessionId: string | null;
 	cwd: string;
 	refreshKey: string;
+	isRunning?: boolean;
+	changesPanelOpen?: boolean;
 }): { changes: SessionChanges | null; current: boolean } {
 	const [result, setResult] = useState<{
 		key: string;
 		changes: SessionChanges;
 	} | null>(null);
 	const requestRef = useRef(0);
+	const fetchedSignatureRef = useRef<string | null>(null);
+	const debounceMs =
+		isRunning && !changesPanelOpen
+			? RUNNING_HIDDEN_REFRESH_DEBOUNCE_MS
+			: REFRESH_DEBOUNCE_MS;
 
 	// A different session never shows the previous one's changes.
 	useEffect(() => {
 		void sessionId;
 		void cwd;
+		fetchedSignatureRef.current = null;
 		setResult(null);
 	}, [sessionId, cwd]);
 
 	useEffect(() => {
 		if (!enabled || !sessionId || !cwd) return;
+		const signature = `${environmentId}\0${sessionId}\0${cwd}\0${refreshKey}`;
+		if (fetchedSignatureRef.current === signature) {
+			return;
+		}
 		const request = ++requestRef.current;
 		const timer = window.setTimeout(() => {
 			desktopClient
@@ -101,12 +116,13 @@ export function useSessionChanges({
 				}))
 				.then((next) => {
 					if (request === requestRef.current) {
+						fetchedSignatureRef.current = signature;
 						setResult({ key: refreshKey, changes: next });
 					}
 				});
-		}, REFRESH_DEBOUNCE_MS);
+		}, debounceMs);
 		return () => window.clearTimeout(timer);
-	}, [enabled, environmentId, sessionId, cwd, refreshKey]);
+	}, [enabled, environmentId, sessionId, cwd, refreshKey, debounceMs]);
 
 	return {
 		changes: result?.changes ?? null,

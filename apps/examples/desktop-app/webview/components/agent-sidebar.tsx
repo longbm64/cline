@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import {
 	Fragment,
+	memo,
 	type ReactNode,
 	useCallback,
 	useEffect,
@@ -331,7 +332,7 @@ function SettingsSectionNavigation({
 	);
 }
 
-export function AgentSidebar({
+export const AgentSidebar = memo(function AgentSidebar({
 	canNavigateBack = false,
 	canNavigateForward = false,
 	newTaskActive = false,
@@ -425,6 +426,8 @@ export function AgentSidebar({
 	);
 	const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
 	const [editingTitle, setEditingTitle] = useState("");
+	const editingTitleRef = useRef(editingTitle);
+	editingTitleRef.current = editingTitle;
 	const [deleteConfirmThread, setDeleteConfirmThread] = useState<Thread | null>(
 		null,
 	);
@@ -552,12 +555,12 @@ export function AgentSidebar({
 
 	const commitRenameThread = useCallback(
 		async (thread: Thread) => {
-			const renamed = await renameThread(thread.id, editingTitle);
+			const renamed = await renameThread(thread.id, editingTitleRef.current);
 			if (renamed) {
 				cancelRenameThread();
 			}
 		},
-		[cancelRenameThread, editingTitle, renameThread],
+		[cancelRenameThread, renameThread],
 	);
 
 	const forkThread = useCallback(
@@ -686,14 +689,24 @@ export function AgentSidebar({
 	);
 	const toggleScheduleGroup = useCallback(
 		(group: SidebarScheduleGroup) => {
-			const expanded = isScheduleGroupExpanded(group);
 			setScheduleGroupExpanded((current) => {
+				const expanded =
+					current.get(group.id) ??
+					group.threads.some((thread) => thread.id === activeThread);
 				const next = new Map(current);
 				next.set(group.id, !expanded);
 				return next;
 			});
 		},
-		[isScheduleGroupExpanded],
+		[activeThread],
+	);
+	const handleHoverCardOpenChange = useCallback(
+		(threadId: string, open: boolean) => {
+			setHoverCardThreadId((current) =>
+				open ? threadId : current === threadId ? null : current,
+			);
+		},
+		[],
 	);
 	const toggleProject = useCallback((project: string) => {
 		setCollapsedProjects((current) => {
@@ -825,35 +838,34 @@ export function AgentSidebar({
 			)}
 		</Button>
 	);
-	const threadItem = (thread: Thread, options?: { nested?: boolean }) => (
-		<ThreadItem
-			editTitle={editingTitle}
-			editing={editingSessionId === thread.id}
-			hoverCardOpen={hoverCardThreadId === thread.id}
-			isActive={activeThread === thread.id}
-			key={thread.id}
-			label={options?.nested ? scheduleRunLabel(thread) : undefined}
-			nested={options?.nested}
-			onHoverCardOpenChange={(open) =>
-				setHoverCardThreadId((current) =>
-					open ? thread.id : current === thread.id ? null : current,
-				)
-			}
-			onCancelRename={cancelRenameThread}
-			onClick={() => openThread(thread.id)}
-			onCommitRename={() => void commitRenameThread(thread)}
-			onDelete={() => requestDeleteThread(thread)}
-			onEditTitleChange={setEditingTitle}
-			onFork={() => void forkThread(thread)}
-			onRename={() => startRenameThread(thread)}
-			onTogglePin={() => void togglePinned(thread)}
-			pendingAction={
-				pendingAction?.sessionId === thread.id ? pendingAction.action : null
-			}
-			thread={thread}
-			unread={unreadSessionIds.has(thread.id)}
-		/>
-	);
+	const threadItem = (thread: Thread, options?: { nested?: boolean }) => {
+		const isEditing = editingSessionId === thread.id;
+		return (
+			<ThreadItem
+				editTitle={isEditing ? editingTitle : ""}
+				editing={isEditing}
+				hoverCardOpen={hoverCardThreadId === thread.id}
+				isActive={activeThread === thread.id}
+				key={thread.id}
+				label={options?.nested ? scheduleRunLabel(thread) : undefined}
+				nested={options?.nested}
+				onCancelRename={cancelRenameThread}
+				onCommitRename={commitRenameThread}
+				onDelete={requestDeleteThread}
+				onEditTitleChange={setEditingTitle}
+				onFork={forkThread}
+				onHoverCardOpenChange={handleHoverCardOpenChange}
+				onOpenThread={openThread}
+				onRename={startRenameThread}
+				onTogglePin={togglePinned}
+				pendingAction={
+					pendingAction?.sessionId === thread.id ? pendingAction.action : null
+				}
+				thread={thread}
+				unread={unreadSessionIds.has(thread.id)}
+			/>
+		);
+	};
 	// Scheduled runs collapse into one row per schedule; everything else
 	// renders as before.
 	const listRow = (row: SidebarListRow) => {
@@ -867,7 +879,7 @@ export function AgentSidebar({
 				expanded={expanded}
 				group={row}
 				key={row.id}
-				onToggle={() => toggleScheduleGroup(row)}
+				onToggle={toggleScheduleGroup}
 				unread={row.threads.some((thread) => unreadSessionIds.has(thread.id))}
 			>
 				{row.threads.map((thread) => threadItem(thread, { nested: true }))}
@@ -1241,7 +1253,8 @@ export function AgentSidebar({
 																collapsed={collapsedSections.has("pinned")}
 																count={pinnedThreads.length}
 																label="Pinned"
-																onToggle={() => toggleSection("pinned")}
+																onToggle={toggleSection}
+																section="pinned"
 															>
 																{pinnedThreads.map((thread) =>
 																	threadItem(thread),
@@ -1253,7 +1266,8 @@ export function AgentSidebar({
 																collapsed={collapsedSections.has("scheduled")}
 																count={scheduledRows.length}
 																label="Scheduled"
-																onToggle={() => toggleSection("scheduled")}
+																onToggle={toggleSection}
+																section="scheduled"
 															>
 																{scheduledRows
 																	.slice(0, scheduledVisibleCount)
@@ -1283,7 +1297,8 @@ export function AgentSidebar({
 																collapsed={collapsedSections.has("tasks")}
 																count={taskThreads.length}
 																label="Tasks"
-																onToggle={() => toggleSection("tasks")}
+																onToggle={toggleSection}
+																section="tasks"
 															>
 																{taskThreads
 																	.slice(0, showMoreCount)
@@ -1317,23 +1332,17 @@ export function AgentSidebar({
 															label={project.label}
 															onNewSession={
 																onNewProjectSession
-																	? () =>
-																			createProjectSession(
-																				project.id,
-																				project.workspacePath,
-																			)
+																	? createProjectSession
 																	: undefined
 															}
 															onOpenInNewWindow={
 																canOpenInNewWindow
-																	? () =>
-																			void openProjectInNewWindow(
-																				project.workspacePath,
-																				project.label,
-																			)
+																	? openProjectInNewWindow
 																	: undefined
 															}
-															onToggle={() => toggleProject(project.id)}
+															onToggle={toggleProject}
+															projectId={project.id}
+															workspacePath={project.workspacePath}
 														>
 															{projectRows.slice(0, visibleCount).map(listRow)}
 															{projectRows.length > visibleCount ? (
@@ -1538,19 +1547,21 @@ export function AgentSidebar({
 			</AlertDialog>
 		</>
 	);
-}
+});
 
-function CategorySection({
+const CategorySection = memo(function CategorySection({
+	section,
 	label,
 	count,
 	collapsed,
 	onToggle,
 	children,
 }: {
+	section: SessionCategory;
 	label: string;
 	count: number;
 	collapsed: boolean;
-	onToggle: () => void;
+	onToggle: (section: SessionCategory) => void;
 	children: ReactNode;
 }) {
 	return (
@@ -1558,7 +1569,7 @@ function CategorySection({
 			<button
 				aria-expanded={!collapsed}
 				className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-sm font-medium text-sidebar-foreground hover:bg-surface-hover-lighter focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-				onClick={onToggle}
+				onClick={() => onToggle(section)}
 				title={label}
 				type="button"
 			>
@@ -1578,9 +1589,11 @@ function CategorySection({
 			) : null}
 		</div>
 	);
-}
+});
 
-function ProjectSection({
+const ProjectSection = memo(function ProjectSection({
+	projectId,
+	workspacePath,
 	label,
 	collapsed,
 	onToggle,
@@ -1588,20 +1601,34 @@ function ProjectSection({
 	onOpenInNewWindow,
 	children,
 }: {
+	projectId: string;
+	workspacePath: string;
 	label: string;
 	collapsed: boolean;
-	onToggle: () => void;
-	onNewSession?: () => void;
-	onOpenInNewWindow?: () => void;
+	onToggle: (projectId: string) => void;
+	onNewSession?: (projectId: string, workspacePath: string) => void;
+	onOpenInNewWindow?: (workspacePath: string, label: string) => Promise<void>;
 	children: ReactNode;
 }) {
+	const [contextMenuOpen, setContextMenuOpen] = useState(false);
 	const hasContextMenu = Boolean(onNewSession || onOpenInNewWindow);
+	const handleToggle = useCallback(
+		() => onToggle(projectId),
+		[onToggle, projectId],
+	);
+	const handleNewSession = useCallback(
+		() => onNewSession?.(projectId, workspacePath),
+		[onNewSession, projectId, workspacePath],
+	);
+	const handleOpenInNewWindow = useCallback(() => {
+		void onOpenInNewWindow?.(workspacePath, label);
+	}, [label, onOpenInNewWindow, workspacePath]);
 	const header = (
 		<div className="group/project flex h-8 w-full min-w-0 items-center gap-0.5 rounded-md px-1 text-sm font-medium text-sidebar-foreground hover:bg-surface-hover-lighter">
 			<button
 				aria-expanded={!collapsed}
 				className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-				onClick={onToggle}
+				onClick={handleToggle}
 				title={label}
 				type="button"
 			>
@@ -1619,7 +1646,7 @@ function ProjectSection({
 					className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface-hover hover:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/project:opacity-100"
 					onClick={(event) => {
 						event.stopPropagation();
-						onNewSession();
+						handleNewSession();
 					}}
 					title={`Tạo session mới trong ${label}`}
 					type="button"
@@ -1633,7 +1660,7 @@ function ProjectSection({
 					className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface-hover hover:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/project:opacity-100"
 					onClick={(event) => {
 						event.stopPropagation();
-						onOpenInNewWindow();
+						handleOpenInNewWindow();
 					}}
 					title={`Mở ${label} trong cửa sổ riêng`}
 					type="button"
@@ -1646,22 +1673,24 @@ function ProjectSection({
 	return (
 		<div className="mb-1 min-w-0">
 			{hasContextMenu ? (
-				<ContextMenu>
+				<ContextMenu onOpenChange={setContextMenuOpen}>
 					<ContextMenuTrigger asChild>{header}</ContextMenuTrigger>
-					<ContextMenuContent className="w-56">
-						{onNewSession ? (
-							<ContextMenuItem onSelect={onNewSession}>
-								<Plus className="size-4" />
-								Tạo session mới trong dự án
-							</ContextMenuItem>
-						) : null}
-						{onOpenInNewWindow ? (
-							<ContextMenuItem onSelect={onOpenInNewWindow}>
-								<ExternalLink className="size-4" />
-								Mở dự án trong cửa sổ riêng
-							</ContextMenuItem>
-						) : null}
-					</ContextMenuContent>
+					{contextMenuOpen ? (
+						<ContextMenuContent className="w-56">
+							{onNewSession ? (
+								<ContextMenuItem onSelect={handleNewSession}>
+									<Plus className="size-4" />
+									Tạo session mới trong dự án
+								</ContextMenuItem>
+							) : null}
+							{onOpenInNewWindow ? (
+								<ContextMenuItem onSelect={handleOpenInNewWindow}>
+									<ExternalLink className="size-4" />
+									Mở dự án trong cửa sổ riêng
+								</ContextMenuItem>
+							) : null}
+						</ContextMenuContent>
+					) : null}
 				</ContextMenu>
 			) : (
 				header
@@ -1669,9 +1698,9 @@ function ProjectSection({
 			{!collapsed ? <div className="pl-3">{children}</div> : null}
 		</div>
 	);
-}
+});
 
-function ScheduleGroupRow({
+const ScheduleGroupRow = memo(function ScheduleGroupRow({
 	group,
 	expanded,
 	active,
@@ -1684,12 +1713,13 @@ function ScheduleGroupRow({
 	/** One of the runs is the open session; the header shows it while collapsed. */
 	active: boolean;
 	unread: boolean;
-	onToggle: () => void;
+	onToggle: (group: SidebarScheduleGroup) => void;
 	children: ReactNode;
 }) {
 	const running = group.threads.some((thread) => thread.status === "running");
 	const statusDotClass = running ? "bg-green-500" : unread ? "bg-blue-500" : "";
 	const runCount = group.threads.length;
+	const handleToggle = useCallback(() => onToggle(group), [group, onToggle]);
 	return (
 		<div className="min-w-0">
 			<button
@@ -1700,7 +1730,7 @@ function ScheduleGroupRow({
 						? "bg-surface-hover text-sidebar-foreground"
 						: "text-sidebar-foreground/80 hover:bg-surface-hover",
 				)}
-				onClick={onToggle}
+				onClick={handleToggle}
 				title={group.label}
 				type="button"
 			>
@@ -1738,9 +1768,9 @@ function ScheduleGroupRow({
 			) : null}
 		</div>
 	);
-}
+});
 
-function ThreadItem({
+const ThreadItem = memo(function ThreadItem({
 	thread,
 	editTitle,
 	editing,
@@ -1748,7 +1778,7 @@ function ThreadItem({
 	isActive,
 	label,
 	nested = false,
-	onClick,
+	onOpenThread,
 	onHoverCardOpenChange,
 	onCancelRename,
 	onCommitRename,
@@ -1769,23 +1799,42 @@ function ThreadItem({
 	label?: string;
 	/** Rendered inside a schedule group: the group already shows the clock. */
 	nested?: boolean;
-	onClick: () => void;
-	onHoverCardOpenChange: (open: boolean) => void;
+	onOpenThread: (threadId: string) => void;
+	onHoverCardOpenChange: (threadId: string, open: boolean) => void;
 	onCancelRename: () => void;
-	onCommitRename: () => void;
+	onCommitRename: (thread: Thread) => Promise<void>;
 	onEditTitleChange: (title: string) => void;
-	onRename: () => void;
-	onTogglePin: () => void;
-	onFork: () => void;
-	onDelete: () => void;
+	onRename: (thread: Thread) => void;
+	onTogglePin: (thread: Thread) => Promise<void>;
+	onFork: (thread: Thread) => Promise<void>;
+	onDelete: (thread: Thread) => void;
 	pendingAction: "rename" | "fork" | "delete" | null;
 	unread: boolean;
 }) {
+	const [contextMenuOpen, setContextMenuOpen] = useState(false);
 	const title = normalizeTitle(thread.title);
 	const rowText = label ?? title;
-	const overviewTitle = getSessionOverviewTitle(title);
 	const pending = pendingAction !== null;
-	const infoItems = getSessionOverviewItems(thread);
+
+	const handleSelect = useCallback(
+		() => onOpenThread(thread.id),
+		[onOpenThread, thread.id],
+	);
+	const handleHoverChange = useCallback(
+		(open: boolean) => onHoverCardOpenChange(thread.id, open),
+		[onHoverCardOpenChange, thread.id],
+	);
+	const handleCommitRename = useCallback(() => {
+		void onCommitRename(thread);
+	}, [onCommitRename, thread]);
+	const handleDelete = useCallback(() => onDelete(thread), [onDelete, thread]);
+	const handleRename = useCallback(() => onRename(thread), [onRename, thread]);
+	const handleFork = useCallback(() => {
+		void onFork(thread);
+	}, [onFork, thread]);
+	const handleTogglePin = useCallback(() => {
+		void onTogglePin(thread);
+	}, [onTogglePin, thread]);
 
 	if (editing) {
 		return (
@@ -1794,7 +1843,7 @@ function ThreadItem({
 					disabled={pendingAction === "rename"}
 					onCancel={onCancelRename}
 					onChange={onEditTitleChange}
-					onCommit={onCommitRename}
+					onCommit={handleCommitRename}
 					value={editTitle}
 				/>
 				{pendingAction === "rename" ? (
@@ -1805,10 +1854,10 @@ function ThreadItem({
 	}
 
 	return (
-		<ContextMenu>
+		<ContextMenu onOpenChange={setContextMenuOpen}>
 			<HoverCard
 				closeDelay={100}
-				onOpenChange={onHoverCardOpenChange}
+				onOpenChange={handleHoverChange}
 				open={hoverCardOpen}
 				openDelay={0}
 			>
@@ -1829,7 +1878,7 @@ function ThreadItem({
 							unread={unread}
 							label={rowText}
 							timestamp={thread.time}
-							onSelect={onClick}
+							onSelect={handleSelect}
 							leading={
 								<>
 									{thread.origin === "cloud" ? (
@@ -1858,7 +1907,7 @@ function ThreadItem({
 									disabled={pending}
 									onClick={(event) => {
 										event.stopPropagation();
-										onDelete();
+										handleDelete();
 									}}
 									size="icon"
 									title="Delete session"
@@ -1871,33 +1920,40 @@ function ThreadItem({
 						/>
 					</HoverCardTrigger>
 				</ContextMenuTrigger>
-				<HoverCardContent
-					align="start"
-					avoidCollisions={false}
-					className="w-72 p-3"
-					// Same flash-on-click suppression as the logo hover card: a
-					// click on the row is a pointer-down outside the card, and the
-					// dismiss + refocus cycle makes the card blink.
-					onPointerDownOutside={(event) => event.preventDefault()}
-					side="right"
-					sideOffset={8}
-				>
-					<AgentSessionOverview title={overviewTitle} items={infoItems} />
-				</HoverCardContent>
+				{hoverCardOpen ? (
+					<HoverCardContent
+						align="start"
+						avoidCollisions={false}
+						className="w-72 p-3"
+						// Same flash-on-click suppression as the logo hover card: a
+						// click on the row is a pointer-down outside the card, and the
+						// dismiss + refocus cycle makes the card blink.
+						onPointerDownOutside={(event) => event.preventDefault()}
+						side="right"
+						sideOffset={8}
+					>
+						<AgentSessionOverview
+							title={getSessionOverviewTitle(title)}
+							items={getSessionOverviewItems(thread)}
+						/>
+					</HoverCardContent>
+				) : null}
 			</HoverCard>
-			<SessionContextMenuContent
-				allowPin={thread.origin !== "cloud"}
-				allowFork={thread.origin !== "cloud"}
-				onDelete={onDelete}
-				onFork={onFork}
-				onRename={onRename}
-				onTogglePin={onTogglePin}
-				pendingAction={pendingAction}
-				pinned={Boolean(thread.pinned)}
-			/>
+			{contextMenuOpen ? (
+				<SessionContextMenuContent
+					allowPin={thread.origin !== "cloud"}
+					allowFork={thread.origin !== "cloud"}
+					onDelete={handleDelete}
+					onFork={handleFork}
+					onRename={handleRename}
+					onTogglePin={handleTogglePin}
+					pendingAction={pendingAction}
+					pinned={Boolean(thread.pinned)}
+				/>
+			) : null}
 		</ContextMenu>
 	);
-}
+});
 
 export function getSessionOverviewTitle(title: string): string {
 	const firstLine = title.split(/\r?\n/, 1)[0] ?? "";

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import type { MessageWithMetadata } from "@cline/shared";
 import { getSharedSessionStore } from "./store";
 
@@ -32,19 +33,106 @@ export type SessionAgentRecord = {
 const TEAM_TASK_MARKER = "__teamtask__";
 const LAST_ACTION_LIMIT = 160;
 
+const MAX_CHILD_MESSAGES_CACHE = 32;
+const childMessagesCache = new Map<
+	string,
+	{
+		size: number;
+		mtimeMs: number;
+		ctimeMs: number;
+		ino: number;
+		messages: MessageWithMetadata[];
+	}
+>();
+
+function parseMessagesFileContent(raw: string): MessageWithMetadata[] {
+	const parsed = JSON.parse(raw) as
+		| { messages?: MessageWithMetadata[] }
+		| MessageWithMetadata[];
+	if (Array.isArray(parsed)) {
+		return parsed;
+	}
+	return Array.isArray(parsed.messages) ? parsed.messages : [];
+}
+
+function getCachedChildMessages(
+	path: string,
+	fileStat: { size: number; mtimeMs: number; ctimeMs: number; ino: number },
+): MessageWithMetadata[] | null {
+	const cached = childMessagesCache.get(path);
+	if (
+		!cached ||
+		cached.size !== fileStat.size ||
+		cached.mtimeMs !== fileStat.mtimeMs ||
+		cached.ctimeMs !== fileStat.ctimeMs ||
+		cached.ino !== fileStat.ino
+	) {
+		return null;
+	}
+	childMessagesCache.delete(path);
+	childMessagesCache.set(path, cached);
+	return cached.messages;
+}
+
+function setCachedChildMessages(
+	path: string,
+	fileStat: { size: number; mtimeMs: number; ctimeMs: number; ino: number },
+	messages: MessageWithMetadata[],
+): void {
+	childMessagesCache.delete(path);
+	childMessagesCache.set(path, {
+		size: fileStat.size,
+		mtimeMs: fileStat.mtimeMs,
+		ctimeMs: fileStat.ctimeMs,
+		ino: fileStat.ino,
+		messages,
+	});
+	if (childMessagesCache.size > MAX_CHILD_MESSAGES_CACHE) {
+		const oldest = childMessagesCache.keys().next().value;
+		if (oldest !== undefined) {
+			childMessagesCache.delete(oldest);
+		}
+	}
+}
+
 function readMessagesFile(path: string): MessageWithMetadata[] | null {
 	if (!path || !existsSync(path)) {
+		if (path) {
+			childMessagesCache.delete(path);
+		}
 		return null;
 	}
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as
-			| { messages?: MessageWithMetadata[] }
-			| MessageWithMetadata[];
-		if (Array.isArray(parsed)) {
-			return parsed;
+		const fileStat = statSync(path);
+		const cached = getCachedChildMessages(path, fileStat);
+		if (cached !== null) {
+			return cached;
 		}
-		return Array.isArray(parsed.messages) ? parsed.messages : [];
+		const messages = parseMessagesFileContent(readFileSync(path, "utf8"));
+		setCachedChildMessages(path, fileStat, messages);
+		return messages;
 	} catch {
+		return null;
+	}
+}
+
+async function readMessagesFileAsync(
+	path: string,
+): Promise<MessageWithMetadata[] | null> {
+	if (!path) {
+		return null;
+	}
+	try {
+		const fileStat = await stat(path);
+		const cached = getCachedChildMessages(path, fileStat);
+		if (cached !== null) {
+			return cached;
+		}
+		const messages = parseMessagesFileContent(await readFile(path, "utf8"));
+		setCachedChildMessages(path, fileStat, messages);
+		return messages;
+	} catch {
+		childMessagesCache.delete(path);
 		return null;
 	}
 }
@@ -60,6 +148,24 @@ function resolveChildMessagesPath(record: {
 	return record.messagesPath?.trim() || undefined;
 }
 
+function resolveChildMessagesRecordPath(sessionId: string): string | undefined {
+	const trimmed = sessionId.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	let record: { parentSessionId?: string; messagesPath?: string } | undefined;
+	try {
+		record = getSharedSessionStore().get(trimmed);
+	} catch {
+		// No session database on this host; nothing to resolve.
+		return undefined;
+	}
+	if (!record?.parentSessionId) {
+		return undefined;
+	}
+	return resolveChildMessagesPath(record);
+}
+
 /**
  * Transcript of a child agent session, or null when the id is not a child or
  * nothing has been written yet. Lets the ordinary session-reading path open a
@@ -68,22 +174,15 @@ function resolveChildMessagesPath(record: {
 export function readChildSessionMessages(
 	sessionId: string,
 ): MessageWithMetadata[] | null {
-	const trimmed = sessionId.trim();
-	if (!trimmed) {
-		return null;
-	}
-	let record: { parentSessionId?: string; messagesPath?: string } | undefined;
-	try {
-		record = getSharedSessionStore().get(trimmed);
-	} catch {
-		// No session database on this host; nothing to resolve.
-		return null;
-	}
-	if (!record?.parentSessionId) {
-		return null;
-	}
-	const messagesPath = resolveChildMessagesPath(record);
+	const messagesPath = resolveChildMessagesRecordPath(sessionId);
 	return messagesPath ? readMessagesFile(messagesPath) : null;
+}
+
+export async function readChildSessionMessagesAsync(
+	sessionId: string,
+): Promise<MessageWithMetadata[] | null> {
+	const messagesPath = resolveChildMessagesRecordPath(sessionId);
+	return messagesPath ? await readMessagesFileAsync(messagesPath) : null;
 }
 
 function truncate(value: string, limit = LAST_ACTION_LIMIT): string {
@@ -173,11 +272,7 @@ function readChildTranscriptSummary(messagesPath: string | undefined): {
 		return { hasMessages: false };
 	}
 	const cached = agentTranscriptMetaCache.get(messagesPath);
-	if (
-		cached &&
-		cached.mtimeMs === stat.mtimeMs &&
-		cached.size === stat.size
-	) {
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
 		return {
 			lastAction: cached.lastAction,
 			hasMessages: cached.hasMessages,
@@ -185,7 +280,8 @@ function readChildTranscriptSummary(messagesPath: string | undefined): {
 	}
 	const messages = readMessagesFile(messagesPath);
 	const hasMessages = Boolean(messages && messages.length > 0);
-	const lastAction = hasMessages && messages ? deriveLastAction(messages) : undefined;
+	const lastAction =
+		hasMessages && messages ? deriveLastAction(messages) : undefined;
 	if (agentTranscriptMetaCache.size >= MAX_AGENT_TRANSCRIPT_META_CACHE) {
 		const oldest = agentTranscriptMetaCache.keys().next().value;
 		if (oldest !== undefined) {

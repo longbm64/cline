@@ -11,6 +11,7 @@ import { Loader2, LoaderCircle, SquareTerminal } from "lucide-react";
 import dynamic from "next/dynamic";
 import {
 	Activity,
+	memo,
 	useCallback,
 	useEffect,
 	useMemo,
@@ -1089,10 +1090,14 @@ function App() {
 	const handleInitialPromptDraftConsumed = useCallback((threadId: string) => {
 		dispatchApp({ type: "consume-initial-prompt-draft", threadId });
 	}, []);
+	const handleDeleteHistorySession = useCallback(
+		(sessionId: string, environmentId: string) =>
+			handleDeleteSession(sessionId, undefined, environmentId),
+		[handleDeleteSession],
+	);
 	const sessionHistory = useSessionHistory({
 		activeSessionId: activeHistorySessionId,
-		onDeleteSession: (sessionId, environmentId) =>
-			handleDeleteSession(sessionId, undefined, environmentId),
+		onDeleteSession: handleDeleteHistorySession,
 		onOpenSession: handleOpenSession,
 		onUpdateSessionMetadata: handleUpdateSessionMetadata,
 	});
@@ -1279,36 +1284,136 @@ function App() {
 		handleViewChange,
 	]);
 
-	const historyWorkspacePaths = useMemo(
-		() =>
-			workspacePathsFromSessions(
-				sessionHistory.sessions,
-				activeThread?.environmentId ?? activeEnvironmentId,
+	const clearStreamFilter = view === "sessions" || !activeThread;
+	useEffect(() => {
+		if (!clearStreamFilter) {
+			return;
+		}
+		const sendEmptyFilter = () => {
+			void desktopClient
+				.invoke("set_session_stream_filter", {
+					environmentId: activeEnvironmentId,
+					sessionId: null,
+				})
+				.catch(() => {});
+		};
+		sendEmptyFilter();
+		return desktopClient.subscribeTransportState((state) => {
+			if (state === "connected") {
+				sendEmptyFilter();
+			}
+		});
+	}, [activeEnvironmentId, clearStreamFilter]);
+
+	const historyWorkspacePathsRef = useRef<string[]>([]);
+	const historyWorkspacePaths = useMemo(() => {
+		const next = workspacePathsFromSessions(
+			sessionHistory.sessions,
+			activeThread?.environmentId ?? activeEnvironmentId,
+		);
+		const prev = historyWorkspacePathsRef.current;
+		if (
+			prev.length === next.length &&
+			prev.every((value, index) => value === next[index])
+		) {
+			return prev;
+		}
+		historyWorkspacePathsRef.current = next;
+		return next;
+	}, [
+		activeEnvironmentId,
+		activeThread?.environmentId,
+		sessionHistory.sessions,
+	]);
+	const activeThreadEnvironmentId =
+		activeThread?.environmentId ?? activeEnvironmentId;
+	const handleAddSshHost = useCallback(
+		() => handleSettingsSectionChange("Remote"),
+		[handleSettingsSectionChange],
+	);
+	const handleOpenModelSettings = useCallback(
+		() => handleSettingsSectionChange("Providers"),
+		[handleSettingsSectionChange],
+	);
+	const handleOpenLocalModels = useCallback(
+		() => handleSettingsSectionChange("Local Models"),
+		[handleSettingsSectionChange],
+	);
+	const handleOpenAccountSettings = useCallback(
+		() => handleSettingsSectionChange("Account"),
+		[handleSettingsSectionChange],
+	);
+	const handleUpdateActiveSessionMetadata = useCallback(
+		(sessionId: string, metadata: SessionMetadata) =>
+			handleUpdateSessionMetadata(
+				sessionId,
+				metadata,
+				activeThreadEnvironmentId,
 			),
-		[activeEnvironmentId, activeThread?.environmentId, sessionHistory.sessions],
+		[activeThreadEnvironmentId, handleUpdateSessionMetadata],
+	);
+	const handleDeleteActiveSession = useCallback(
+		(sessionId: string, threadId?: string) =>
+			handleDeleteSession(sessionId, threadId, activeThreadEnvironmentId),
+		[activeThreadEnvironmentId, handleDeleteSession],
+	);
+	const toggleTerminalShortcutKey = keybindings["toggle-terminal"].key;
+	const toggleTerminalShortcut = useMemo(
+		() =>
+			toggleTerminalShortcutKey
+				? formatAccelerator(toggleTerminalShortcutKey)
+				: undefined,
+		[toggleTerminalShortcutKey],
+	);
+	const chatTerminalProp = useMemo(
+		() =>
+			terminalAvailable
+				? {
+						open: terminalPanel.open,
+						height: terminalPanel.height,
+						shortcut: toggleTerminalShortcut,
+						onToggle: handleToggleTerminal,
+						onClose: handleCloseTerminal,
+						onHeightChange: handleTerminalHeightChange,
+					}
+				: undefined,
+		[
+			handleCloseTerminal,
+			handleTerminalHeightChange,
+			handleToggleTerminal,
+			terminalAvailable,
+			terminalPanel.height,
+			terminalPanel.open,
+			toggleTerminalShortcut,
+		],
 	);
 	// A child agent session names its parent, but only the history list knows the
 	// parent's title — resolve it here so the chat header can point back to it.
-	const activeParentSession = useMemo(() => {
-		const parentSessionId =
-			activeThread?.historySession?.parentSessionId?.trim();
-		if (!parentSessionId) {
+	const activeParentSessionId =
+		activeThread?.historySession?.parentSessionId?.trim() || undefined;
+	const activeParentSessionEnvironmentId = activeThread?.environmentId;
+	const activeParentSessionTitle = useMemo(() => {
+		if (!activeParentSessionId || !activeParentSessionEnvironmentId) {
 			return undefined;
 		}
-		const title = sessionHistory.threads.find(
-			(thread) =>
-				thread.id ===
-				sessionKey({
-					sessionId: parentSessionId,
-					environmentId: activeThread.environmentId,
-				}),
-		)?.title;
-		return { sessionId: parentSessionId, title };
+		const parentKey = sessionKey({
+			sessionId: activeParentSessionId,
+			environmentId: activeParentSessionEnvironmentId,
+		});
+		return sessionHistory.threads.find((thread) => thread.id === parentKey)
+			?.title;
 	}, [
-		activeThread?.historySession?.parentSessionId,
-		activeThread?.environmentId,
+		activeParentSessionEnvironmentId,
+		activeParentSessionId,
 		sessionHistory.threads,
 	]);
+	const activeParentSession = useMemo(
+		() =>
+			activeParentSessionId
+				? { sessionId: activeParentSessionId, title: activeParentSessionTitle }
+				: undefined,
+		[activeParentSessionId, activeParentSessionTitle],
+	);
 
 	return (
 		<AccountProvider>
@@ -1374,7 +1479,7 @@ function App() {
 											environmentProfilesLoading={
 												remoteEnvironmentProfilesLoading
 											}
-											onAddSshHost={() => handleSettingsSectionChange("Remote")}
+											onAddSshHost={handleAddSshHost}
 											onPickRemoteWorkspaceDirectory={
 												pickRemoteWorkspaceDirectory
 											}
@@ -1405,52 +1510,21 @@ function App() {
 												handleInitialPromptDraftConsumed
 											}
 											onRunPromptInNewThread={handleRunPromptInNewThread}
-											onUpdateSessionMetadata={(sessionId, metadata) =>
-												handleUpdateSessionMetadata(
-													sessionId,
-													metadata,
-													activeThread.environmentId,
-												)
+											onUpdateSessionMetadata={
+												handleUpdateActiveSessionMetadata
 											}
 											threadId={activeThread.id}
-											onDeleteSession={(sessionId, threadId) =>
-												handleDeleteSession(
-													sessionId,
-													threadId,
-													activeThread.environmentId,
-												)
-											}
+											onDeleteSession={handleDeleteActiveSession}
 											onNewThread={handleNewThread}
 											onOpenSession={handleOpenSession}
 											onOpenSessionById={handleOpenSessionById}
 											onOpenSetup={handleOpenSetup}
-											onOpenModelSettings={() =>
-												handleSettingsSectionChange("Providers")
-											}
-											onOpenLocalModels={() =>
-												handleSettingsSectionChange("Local Models")
-											}
-											onOpenAccountSettings={() =>
-												handleSettingsSectionChange("Account")
-											}
+											onOpenModelSettings={handleOpenModelSettings}
+											onOpenLocalModels={handleOpenLocalModels}
+											onOpenAccountSettings={handleOpenAccountSettings}
 											parentSession={activeParentSession}
 											onThreadStarted={handleThreadStarted}
-											terminal={
-												terminalAvailable
-													? {
-															open: terminalPanel.open,
-															height: terminalPanel.height,
-															shortcut: keybindings["toggle-terminal"].key
-																? formatAccelerator(
-																		keybindings["toggle-terminal"].key,
-																	)
-																: undefined,
-															onToggle: handleToggleTerminal,
-															onClose: handleCloseTerminal,
-															onHeightChange: handleTerminalHeightChange,
-														}
-													: undefined
-											}
+											terminal={chatTerminalProp}
 										/>
 									</div>
 								) : null}
@@ -1541,7 +1615,7 @@ function App() {
 // the boot spinner; the effect still refreshes in the background.
 let workspacesLoadedOnce = false;
 
-function ChatThreadPane({
+const ChatThreadPane = memo(function ChatThreadPane({
 	confirmHandoffGit,
 	threadId,
 	promptDrafts,
@@ -1676,6 +1750,20 @@ function ChatThreadPane({
 		initialWorkspacePath,
 		initialAutoSend?.configOverrides,
 	);
+	const effectiveSubscribedSessionId =
+		sessionId ?? historySession?.sessionId ?? null;
+	useEffect(() => {
+		if (chatTransportState !== "connected") {
+			return;
+		}
+		void desktopClient
+			.invoke("set_session_stream_filter", {
+				environmentId,
+				sessionId: effectiveSubscribedSessionId,
+			})
+			.catch(() => {});
+	}, [chatTransportState, effectiveSubscribedSessionId, environmentId]);
+
 	// Bind the runtime session to the thread so deleting it elsewhere (e.g.
 	// the sidebar) can close this pane even when it was not opened from history.
 	useEffect(() => {
@@ -3543,6 +3631,8 @@ function ChatThreadPane({
 			// Tool calls and turn boundaries both move the working tree; the tool-event
 			// diff only refreshes when a turn ends, so it can't drive this.
 			refreshKey: `${status}:${activityKey}`,
+			isRunning: status === "running",
+			changesPanelOpen: workspacePanel === "changes",
 		});
 	// Git checkpoints when the workspace has them, otherwise the tool-event
 	// reconstruction.
@@ -3917,4 +4007,4 @@ function ChatThreadPane({
 			</AlertDialog>
 		</WorkspaceProvider>
 	);
-}
+});

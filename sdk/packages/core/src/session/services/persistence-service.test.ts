@@ -1105,4 +1105,59 @@ describe("UnifiedSessionPersistenceService", () => {
 			expect(deleteSidecar).toHaveBeenCalledWith(sessionId);
 		},
 	);
+
+	sqliteIt(
+		"serializes concurrent persistSessionMessages calls per session atomically",
+		async () => {
+			const dbDir = mkdtempSync(join(tmpdir(), "serial-messages-db-"));
+			const sessionsDir = mkdtempSync(join(tmpdir(), "serial-messages-"));
+			tempDirs.push(dbDir, sessionsDir);
+
+			const store = new SqliteSessionStore({ sessionsDir: dbDir });
+			stores.push(store);
+			const service = new CoreSessionService(store, {
+				sessionArtifactsDir: sessionsDir,
+			});
+			const sessionId = "concurrent-persist-session";
+			const artifacts = await service.createRootSessionWithArtifacts({
+				sessionId,
+				source: SessionSource.CLI,
+				pid: process.pid,
+				interactive: false,
+				provider: "anthropic",
+				model: "claude-sonnet-4-6",
+				cwd: "/tmp/project",
+				workspaceRoot: "/tmp/project",
+				enableTools: true,
+				enableSpawn: false,
+				enableTeams: false,
+				prompt: "serial",
+				startedAt: "2026-04-10T19:00:00.000Z",
+			});
+
+			await Promise.all([
+				service.persistSessionMessages(sessionId, [
+					{ role: "user", content: "first" },
+				]),
+				service.persistSessionMessages(sessionId, [
+					{ role: "user", content: "first" },
+					{ role: "assistant", content: "second" },
+				]),
+				service.persistSessionMessages(sessionId, [
+					{ role: "user", content: "first" },
+					{ role: "assistant", content: "third" },
+				]),
+			]);
+
+			const payload = JSON.parse(
+				readFileSync(artifacts.messagesPath, "utf8"),
+			) as { messages?: Array<{ role: string; content: string }> };
+			expect(
+				payload.messages?.map(({ role, content }) => ({ role, content })),
+			).toEqual([
+				{ role: "user", content: "first" },
+				{ role: "assistant", content: "third" },
+			]);
+		},
+	);
 });

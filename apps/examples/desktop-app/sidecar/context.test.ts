@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeCapabilities } from "@cline/core";
@@ -2230,5 +2230,244 @@ describe("Chat chunk pipe selection", () => {
 			"reviewer",
 		]);
 		expect(buffered["agent-sub-1"]).toHaveLength(2);
+	});
+});
+
+describe("Per-client session stream filter", () => {
+	function eventsForClient(send: ReturnType<typeof vi.fn>) {
+		return send.mock.calls.map(
+			([raw]) =>
+				JSON.parse(String(raw)) as {
+					type: string;
+					event: { name: string; payload: Record<string, unknown> };
+				},
+		);
+	}
+
+	it("delivers delta streams only for the subscribed session while passing through lifecycle and unfiltered clients", async () => {
+		const {
+			createSidecarContext,
+			handleCoreSessionEvent,
+			sendEventToClient,
+			setClientSessionStreamFilter,
+		} = await import("./context");
+
+		const ctx = createSidecarContext("/workspace/project");
+		const clientFocusedSend = vi.fn();
+		const clientFocused = { send: clientFocusedSend };
+		const clientOverviewSend = vi.fn();
+		const clientOverview = { send: clientOverviewSend };
+		const clientUnfilteredSend = vi.fn();
+		const clientUnfiltered = { send: clientUnfilteredSend };
+
+		ctx.wsClients.add(clientFocused);
+		ctx.wsClients.add(clientOverview);
+		ctx.wsClients.add(clientUnfiltered);
+
+		setClientSessionStreamFilter(clientFocused, "session-1", "local");
+		setClientSessionStreamFilter(clientOverview, null, "local");
+
+		// Delta chunks for focused session vs background session
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: { type: "content_start", contentType: "text", text: "focus-1" },
+			},
+		} as never);
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-2",
+				event: { type: "content_start", contentType: "text", text: "bg-2" },
+			},
+		} as never);
+
+		// Subagent delta for background session vs focused session
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-1",
+				event: {
+					type: "content_start",
+					contentType: "text",
+					text: "sub-focus",
+					agentId: "agent-sub-1",
+					parentAgentId: "agent-root",
+				},
+			},
+		} as never);
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-2",
+				event: {
+					type: "content_start",
+					contentType: "text",
+					text: "sub-bg",
+					agentId: "agent-sub-2",
+					parentAgentId: "agent-root",
+				},
+			},
+		} as never);
+
+		// Lifecycle pass-through events for background session-2
+		handleCoreSessionEvent(ctx, {
+			type: "agent_event",
+			payload: {
+				sessionId: "session-2",
+				event: { type: "done", reason: "completed", text: "done" },
+			},
+		} as never);
+		handleCoreSessionEvent(ctx, {
+			type: "status",
+			payload: {
+				sessionId: "session-2",
+				status: "idle",
+			},
+		} as never);
+
+		// Direct client send should still work via sendEventToClient helper
+		expect(
+			sendEventToClient(ctx, clientOverview, "tool_approval_state", {
+				sessionId: "session-2",
+			}),
+		).toBe(true);
+
+		const focusedEvents = eventsForClient(clientFocusedSend);
+		const focusedStreams = focusedEvents
+			.filter((entry) => entry.event.name === "chat_event")
+			.map((entry) => [
+				entry.event.payload.sessionId,
+				entry.event.payload.stream,
+			]);
+		expect(focusedStreams).toEqual([
+			["session-1", "chat_text"],
+			["session-2", "chat_done"],
+		]);
+		expect(
+			focusedEvents
+				.filter((entry) => entry.event.name === "subagent_chat_event")
+				.map((entry) => entry.event.payload.sessionId),
+		).toEqual(["session-1"]);
+		expect(
+			focusedEvents.some(
+				(entry) =>
+					entry.event.name === "chat_session_status" &&
+					entry.event.payload.sessionId === "session-2",
+			),
+		).toBe(true);
+
+		const overviewEvents = eventsForClient(clientOverviewSend);
+		expect(
+			overviewEvents
+				.filter((entry) => entry.event.name === "chat_event")
+				.map((entry) => [
+					entry.event.payload.sessionId,
+					entry.event.payload.stream,
+				]),
+		).toEqual([["session-2", "chat_done"]]);
+		expect(
+			overviewEvents.some(
+				(entry) => entry.event.name === "subagent_chat_event",
+			),
+		).toBe(false);
+
+		const unfilteredEvents = eventsForClient(clientUnfilteredSend);
+		expect(
+			unfilteredEvents
+				.filter((entry) => entry.event.name === "chat_event")
+				.map((entry) => [
+					entry.event.payload.sessionId,
+					entry.event.payload.stream,
+				]),
+		).toEqual([
+			["session-1", "chat_text"],
+			["session-2", "chat_text"],
+			["session-2", "chat_done"],
+		]);
+		expect(
+			unfilteredEvents
+				.filter((entry) => entry.event.name === "subagent_chat_event")
+				.map((entry) => entry.event.payload.sessionId),
+		).toEqual(["session-1", "session-2"]);
+	});
+
+	it("filters by environmentId when payload carries an environmentId", async () => {
+		const {
+			createSidecarContext,
+			emitChunk,
+			getEnvironmentContext,
+			hasClientSessionStreamFilter,
+			setClientSessionStreamFilter,
+		} = await import("./context");
+
+		const ctx = createSidecarContext("/workspace/project");
+		const remoteCtx = getEnvironmentContext(ctx, "remote-env-1");
+		const clientSend = vi.fn();
+		const client = { send: clientSend };
+		ctx.wsClients.add(client);
+
+		expect(hasClientSessionStreamFilter(client)).toBe(false);
+		setClientSessionStreamFilter(client, "session-shared", "remote-env-1");
+		expect(hasClientSessionStreamFilter(client)).toBe(true);
+
+		emitChunk(ctx, "session-shared", "chat_text", "wrong-env");
+		emitChunk(remoteCtx, "session-shared", "chat_text", "right-env");
+
+		const delivered = eventsForClient(clientSend).map(
+			(entry) => entry.event.payload.chunk,
+		);
+		expect(delivered).toEqual(["right-env"]);
+	});
+});
+
+describe("Buffered session chunk log persistence", () => {
+	const dirs: string[] = [];
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		for (const dir of dirs.splice(0)) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("batches small chunk bursts and flushes cleanly on disposeSidecarContext", async () => {
+		const {
+			createSidecarContext,
+			disposeSidecarContext,
+			emitChunk,
+			flushSessionLogChunks,
+		} = await import("./context");
+		const { sessionLogPath } = await import("./paths");
+
+		const dir = mkdtempSync(join(tmpdir(), "cline-session-log-test-"));
+		dirs.push(dir);
+		vi.stubEnv("CLINE_KANBAN_DATA_DIR", dir);
+
+		const ctx = createSidecarContext("/workspace/project");
+		emitChunk(ctx, "buffered-1", "chat_text", "hello ");
+		emitChunk(ctx, "buffered-1", "chat_text", "world");
+
+		// Not written immediately for 2 chunks (< 32 lines and < 250ms).
+		expect(existsSync(sessionLogPath("buffered-1"))).toBe(false);
+
+		await disposeSidecarContext(ctx);
+		const lines = readFileSync(sessionLogPath("buffered-1"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { chunk: string; stream: string });
+		expect(lines.map((l) => l.chunk)).toEqual(["hello ", "world"]);
+
+		// Recreate or remove dir and burst >= 32 lines to verify ENOENT recovery + threshold flush.
+		rmSync(dir, { recursive: true, force: true });
+		for (let i = 0; i < 34; i += 1) {
+			emitChunk(ctx, "buffered-2", "chat_text", `c-${i}`);
+		}
+		await flushSessionLogChunks("buffered-2");
+		const burstLines = readFileSync(sessionLogPath("buffered-2"), "utf8")
+			.trim()
+			.split("\n");
+		expect(burstLines).toHaveLength(34);
 	});
 });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { writeSessionManifest } from "../paths";
-import { readSessionMessages } from "./messages";
+import { readSessionMessages, readSessionUsageSummary } from "./messages";
 
 describe("readSessionMessages", () => {
 	it("restores persisted errors with the error display role", async () => {
@@ -711,6 +711,42 @@ describe("readSessionMessages", () => {
 				toolName: "web_search",
 				hookEventName: "history_tool_result",
 			},
+		});
+	});
+
+	it("summarizes usage across projected messages without building display payloads", async () => {
+		const sessionId = `usage-summary-${Date.now()}`;
+		const liveSessions = new Map([
+			[
+				sessionId,
+				{
+					messages: [
+						{ role: "user", content: "Hello" },
+						{
+							role: "assistant",
+							content: "Hi",
+							metrics: { inputTokens: 120, outputTokens: 30, cost: 0.015 },
+						},
+						{
+							role: "assistant",
+							content: "Again",
+							metrics: { inputTokens: 80, outputTokens: 20, cost: 0.01 },
+						},
+					],
+				},
+			],
+		]);
+
+		const summary = await readSessionUsageSummary(
+			{ liveSessions } as Parameters<typeof readSessionUsageSummary>[0],
+			sessionId,
+			1200,
+		);
+
+		expect(summary).toEqual({
+			inputTokens: 200,
+			outputTokens: 50,
+			totalCostUsd: 0.025,
 		});
 	});
 });

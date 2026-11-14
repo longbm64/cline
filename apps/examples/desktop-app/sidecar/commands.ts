@@ -125,9 +125,11 @@ import {
 	getEnvironmentContext,
 	getEnvironmentContexts,
 	getRuntimeBinding,
+	hasClientSessionStreamFilter,
 	readSubagentLiveStreams,
 	resolveSidecarAskQuestion,
 	sendEventToClient,
+	setClientSessionStreamFilter,
 } from "./context";
 import { writeDiagnosticsReport } from "./diagnostics";
 import {
@@ -202,6 +204,7 @@ import {
 import {
 	readPersistedChatMessages,
 	readSessionMessages,
+	readSessionUsageSummary,
 } from "./session-data/messages";
 import { searchWorkspaceFiles } from "./session-data/search";
 import { getSharedSessionStore } from "./session-data/store";
@@ -726,7 +729,8 @@ async function listSessionsFromSidecarManager(
 	workspaceRootFilter?: string,
 ): Promise<unknown> {
 	const max = Math.max(1, Math.floor(limit));
-	const normalizedFilter = normalizeComparableWorkspacePath(workspaceRootFilter);
+	const normalizedFilter =
+		normalizeComparableWorkspacePath(workspaceRootFilter);
 	const scanLimit = normalizedFilter ? Math.max(max * 4, 300) : max;
 	const byId = new Map<string, JsonRecord>();
 	const store = getSharedSessionStore();
@@ -737,10 +741,7 @@ async function listSessionsFromSidecarManager(
 			if (typeof store.list === "function") {
 				for (const row of store.list(Math.max(scanLimit * 2, 400))) {
 					if (row?.sessionId) {
-						localPersistedById.set(
-							row.sessionId,
-							row as unknown as JsonRecord,
-						);
+						localPersistedById.set(row.sessionId, row as unknown as JsonRecord);
 					}
 				}
 			}
@@ -755,7 +756,10 @@ async function listSessionsFromSidecarManager(
 			return true;
 		}
 		const sessionWorkspace = normalizeComparableWorkspacePath(
-			candidate.workspaceRoot || candidate.workspace_root || candidate.cwd || "",
+			candidate.workspaceRoot ||
+				candidate.workspace_root ||
+				candidate.cwd ||
+				"",
 		);
 		return sessionWorkspace === normalizedFilter;
 	};
@@ -2043,6 +2047,18 @@ export async function handleCommand(
 		ctx.hubStartup?.start();
 		return ctx.hubStartup?.status ?? null;
 	}
+	if (command === "set_session_stream_filter") {
+		if (options?.connection) {
+			setClientSessionStreamFilter(
+				options.connection,
+				asTrimmedString(args?.sessionId) ?? null,
+				requestedEnvironmentId(args) ??
+					ctx.activeEnvironmentId ??
+					LOCAL_ENVIRONMENT_ID,
+			);
+		}
+		return true;
+	}
 	// The transport is published before the Hub is ready. Hold Hub-backed
 	// commands until startup settles, as they waited for the transport before.
 	if (ctx.hubStartup && !isHubIndependentCommand(command)) {
@@ -2271,6 +2287,19 @@ export async function handleCommand(
 		) {
 			throw new Error("Git preparation requires a trusted desktop connection");
 		}
+		if (
+			options?.connection &&
+			hasClientSessionStreamFilter(options.connection) &&
+			(request.action === "send" || request.action === "attach") &&
+			typeof request.sessionId === "string" &&
+			request.sessionId.trim()
+		) {
+			setClientSessionStreamFilter(
+				options.connection,
+				request.sessionId.trim(),
+				ctx.activeEnvironmentId ?? LOCAL_ENVIRONMENT_ID,
+			);
+		}
 		const { handleChatSessionCommand } = await import("./chat-session");
 		return await handleChatSessionCommand(ctx, request);
 	}
@@ -2381,6 +2410,32 @@ export async function handleCommand(
 			maxMessages,
 			remoteMessages,
 			remoteSession?.workspaceRoot || remoteSession?.cwd || undefined,
+		);
+	}
+	if (command === "read_session_usage_summary") {
+		const sessionId = String(args?.sessionId ?? "").trim();
+		const cloud = getCloudSessionManager(ctx);
+		const maxMessages =
+			typeof args?.maxMessages === "number" ? args.maxMessages : 1200;
+		if (cloud.isCloudSession(sessionId)) {
+			const messages = await cloud.readMessages(sessionId);
+			return await readSessionUsageSummary(
+				ctx,
+				sessionId,
+				maxMessages,
+				messages,
+			);
+		}
+		const binding = await getCommandSessionBinding(ctx, sessionId, args);
+		if (binding?.kind !== "ssh") {
+			return await readSessionUsageSummary(ctx, sessionId, maxMessages);
+		}
+		const remoteMessages = await binding.sessionManager.readMessages(sessionId);
+		return await readSessionUsageSummary(
+			ctx,
+			sessionId,
+			maxMessages,
+			remoteMessages,
 		);
 	}
 	if (command === "read_session_hooks") {

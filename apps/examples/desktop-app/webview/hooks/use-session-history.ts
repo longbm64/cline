@@ -143,6 +143,7 @@ const USAGE_HYDRATION_WINDOW = 10;
 // Each usage read parses a whole transcript in the sidecar, so a page of rows
 // is drained a few at a time instead of all at once.
 const MAX_CONCURRENT_USAGE_FETCHES = 4;
+const RUNNING_USAGE_REFETCH_INTERVAL_MS = 10_000;
 const HISTORY_REFRESH_INTERVAL_MS = 12_000;
 const MIN_EVENT_HISTORY_REFRESH_INTERVAL_MS = 2_000;
 const HISTORY_EVENT_REFRESH_DELAY_MS = 1_000;
@@ -411,6 +412,28 @@ function summarizeUsageFromMessages(messages: SessionMessage[]): {
 	return { inputTokens, outputTokens, totalCostUsd };
 }
 
+function parseUsageSummaryResponse(value: unknown): SessionUsage | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	const candidate = value as Partial<SessionUsage>;
+	if (
+		typeof candidate.inputTokens !== "number" ||
+		typeof candidate.outputTokens !== "number" ||
+		typeof candidate.totalCostUsd !== "number" ||
+		!Number.isFinite(candidate.inputTokens) ||
+		!Number.isFinite(candidate.outputTokens) ||
+		!Number.isFinite(candidate.totalCostUsd)
+	) {
+		return null;
+	}
+	return {
+		inputTokens: candidate.inputTokens,
+		outputTokens: candidate.outputTokens,
+		totalCostUsd: candidate.totalCostUsd,
+	};
+}
+
 function areScheduleInfosEqual(
 	a: ReturnType<typeof getSessionMetadataSchedule>,
 	b: ReturnType<typeof getSessionMetadataSchedule>,
@@ -422,88 +445,65 @@ function areScheduleInfosEqual(
 	);
 }
 
-function areSessionsEquivalent(
-	current: SessionHistoryItem[],
-	next: SessionHistoryItem[],
+function isSessionItemEqual(
+	a: SessionHistoryItem,
+	b: SessionHistoryItem,
 ): boolean {
-	if (current.length !== next.length) {
-		return false;
-	}
-	for (let i = 0; i < current.length; i += 1) {
-		const a = current[i];
-		const b = next[i];
-		if (
-			a.sessionId !== b.sessionId ||
-			a.origin !== b.origin ||
-			a.repoUrl !== b.repoUrl ||
-			getSessionSource(a) !== getSessionSource(b) ||
-			a.status !== b.status ||
-			a.startedAt !== b.startedAt ||
-			a.endedAt !== b.endedAt ||
-			a.lastActivityAt !== b.lastActivityAt ||
-			a.prompt !== b.prompt ||
-			getSessionMetadataIsScheduled(a.metadata) !==
-				getSessionMetadataIsScheduled(b.metadata) ||
-			getSessionMetadataGitBranch(a.metadata) !==
-				getSessionMetadataGitBranch(b.metadata) ||
-			getSessionMetadataTitle(a.metadata) !==
-				getSessionMetadataTitle(b.metadata) ||
-			getSessionMetadataPinned(a.metadata) !==
-				getSessionMetadataPinned(b.metadata) ||
-			a.metadata?.provisioningPhase !== b.metadata?.provisioningPhase ||
-			!areScheduleInfosEqual(
-				getSessionMetadataSchedule(a.metadata),
-				getSessionMetadataSchedule(b.metadata),
-			) ||
-			a.environmentId !== b.environmentId ||
-			a.workspaceRoot !== b.workspaceRoot ||
-			a.cwd !== b.cwd ||
-			a.provider !== b.provider ||
-			a.model !== b.model
-		) {
-			return false;
-		}
-	}
-	return true;
+	return (
+		a.sessionId === b.sessionId &&
+		a.origin === b.origin &&
+		a.repoUrl === b.repoUrl &&
+		getSessionSource(a) === getSessionSource(b) &&
+		a.status === b.status &&
+		a.startedAt === b.startedAt &&
+		a.endedAt === b.endedAt &&
+		a.lastActivityAt === b.lastActivityAt &&
+		a.prompt === b.prompt &&
+		getSessionMetadataIsScheduled(a.metadata) ===
+			getSessionMetadataIsScheduled(b.metadata) &&
+		getSessionMetadataGitBranch(a.metadata) ===
+			getSessionMetadataGitBranch(b.metadata) &&
+		getSessionMetadataTitle(a.metadata) ===
+			getSessionMetadataTitle(b.metadata) &&
+		getSessionMetadataPinned(a.metadata) ===
+			getSessionMetadataPinned(b.metadata) &&
+		a.metadata?.provisioningPhase === b.metadata?.provisioningPhase &&
+		areScheduleInfosEqual(
+			getSessionMetadataSchedule(a.metadata),
+			getSessionMetadataSchedule(b.metadata),
+		) &&
+		a.environmentId === b.environmentId &&
+		a.workspaceRoot === b.workspaceRoot &&
+		a.cwd === b.cwd &&
+		a.provider === b.provider &&
+		a.model === b.model
+	);
 }
 
-function areThreadsEquivalent(
-	current: SessionThread[],
-	next: SessionThread[],
-): boolean {
-	if (current.length !== next.length) {
-		return false;
-	}
-	for (let i = 0; i < current.length; i += 1) {
-		const a = current[i];
-		const b = next[i];
-		if (
-			a.id !== b.id ||
-			a.origin !== b.origin ||
-			a.repoUrl !== b.repoUrl ||
-			a.title !== b.title ||
-			a.source !== b.source ||
-			a.codebase !== b.codebase ||
-			a.workspacePath !== b.workspacePath ||
-			a.time !== b.time ||
-			a.provider !== b.provider ||
-			a.model !== b.model ||
-			a.gitBranch !== b.gitBranch ||
-			a.inputTokens !== b.inputTokens ||
-			a.outputTokens !== b.outputTokens ||
-			a.totalCostUsd !== b.totalCostUsd ||
-			a.status !== b.status ||
-			a.pinned !== b.pinned ||
-			a.isScheduled !== b.isScheduled ||
-			a.startedAt !== b.startedAt ||
-			a.scheduleId !== b.scheduleId ||
-			a.scheduleName !== b.scheduleName ||
-			a.scheduleRunNumber !== b.scheduleRunNumber
-		) {
-			return false;
-		}
-	}
-	return true;
+function isThreadItemEqual(a: SessionThread, b: SessionThread): boolean {
+	return (
+		a.id === b.id &&
+		a.origin === b.origin &&
+		a.repoUrl === b.repoUrl &&
+		a.title === b.title &&
+		a.source === b.source &&
+		a.codebase === b.codebase &&
+		a.workspacePath === b.workspacePath &&
+		a.time === b.time &&
+		a.provider === b.provider &&
+		a.model === b.model &&
+		a.gitBranch === b.gitBranch &&
+		a.inputTokens === b.inputTokens &&
+		a.outputTokens === b.outputTokens &&
+		a.totalCostUsd === b.totalCostUsd &&
+		a.status === b.status &&
+		a.pinned === b.pinned &&
+		a.isScheduled === b.isScheduled &&
+		a.startedAt === b.startedAt &&
+		a.scheduleId === b.scheduleId &&
+		a.scheduleName === b.scheduleName &&
+		a.scheduleRunNumber === b.scheduleRunNumber
+	);
 }
 
 function updateThreadById(
@@ -680,6 +680,11 @@ export function useSessionHistory({
 	const usageHydratedStatusRef = useRef<Map<string, SessionHistoryStatus>>(
 		new Map(),
 	);
+	const usageHydratedAtRef = useRef<Map<string, number>>(new Map());
+	const pendingUsageUpdatesRef = useRef<
+		Map<string, { usage: SessionUsage; zeroFallback?: boolean }>
+	>(new Map());
+	const usageFlushTimeoutRef = useRef<number | null>(null);
 	const titleLoadingRef = useRef<Set<string>>(new Set());
 	const messageHydratedStatusRef = useRef<Map<string, SessionHistoryStatus>>(
 		new Map(),
@@ -928,11 +933,24 @@ export function useSessionHistory({
 					}
 				}
 
-				setSessions((current) =>
-					areSessionsEquivalent(current, mergedSessions)
-						? current
-						: mergedSessions,
-				);
+				setSessions((current) => {
+					const existingByKey = new Map(
+						current.map((session) => [sessionKey(session), session]),
+					);
+					let changed = current.length !== mergedSessions.length;
+					const stabilized = mergedSessions.map((session, index) => {
+						const existing = existingByKey.get(sessionKey(session));
+						if (existing && isSessionItemEqual(existing, session)) {
+							if (current[index] !== existing) {
+								changed = true;
+							}
+							return existing;
+						}
+						changed = true;
+						return session;
+					});
+					return changed ? stabilized : current;
+				});
 				const mapped = mergedSessions.map(toThread);
 				const metadataTitleById = new Map(
 					mergedSessions.map((session) => [
@@ -944,21 +962,30 @@ export function useSessionHistory({
 					const existingById = new Map(
 						current.map((thread) => [thread.id, thread]),
 					);
-					const next = mapped.map((thread) => {
+					let changed = current.length !== mapped.length;
+					const next = mapped.map((thread, index) => {
 						const existing = existingById.get(thread.id);
 						const incomingMetadataTitle = metadataTitleById.get(thread.id);
 						const keepExistingTitle =
 							Boolean(existing) &&
 							!incomingMetadataTitle &&
 							!(existing?.title.startsWith("Session ") ?? true);
-						return {
+						const candidate: SessionThread = {
 							...thread,
 							title:
 								keepExistingTitle && existing ? existing.title : thread.title,
 							...usageByIdRef.current.get(thread.id),
 						};
+						if (existing && isThreadItemEqual(existing, candidate)) {
+							if (current[index] !== existing) {
+								changed = true;
+							}
+							return existing;
+						}
+						changed = true;
+						return candidate;
 					});
-					return areThreadsEquivalent(current, next) ? current : next;
+					return changed ? next : current;
 				});
 				loadedLimitRef.current = Math.max(loadedLimitRef.current, limit);
 				setHasLoadedHistory(true);
@@ -1072,6 +1099,11 @@ export function useSessionHistory({
 				refreshTimeoutRef.current = null;
 				scheduledRefreshAtRef.current = null;
 			}
+			if (usageFlushTimeoutRef.current !== null) {
+				window.clearTimeout(usageFlushTimeoutRef.current);
+				usageFlushTimeoutRef.current = null;
+				pendingUsageUpdatesRef.current.clear();
+			}
 		};
 	}, [scheduleRefresh]);
 
@@ -1136,64 +1168,132 @@ export function useSessionHistory({
 				if (inFlightStatus !== undefined) {
 					return inFlightStatus === session.status ? "skip" : "defer";
 				}
-				const needsFetch =
+				if (
 					!usageByIdRef.current.has(sessionId) ||
-					session.status === "running" ||
-					usageHydratedStatusRef.current.get(sessionId) !== session.status;
-				return needsFetch ? "fetch" : "skip";
+					usageHydratedStatusRef.current.get(sessionId) !== session.status
+				) {
+					return "fetch";
+				}
+				if (session.status === "running") {
+					const lastFetchedAt = usageHydratedAtRef.current.get(sessionId);
+					return lastFetchedAt === undefined ||
+						Date.now() - lastFetchedAt >= RUNNING_USAGE_REFETCH_INTERVAL_MS
+						? "fetch"
+						: "skip";
+				}
+				return "skip";
+			};
+
+			const queueUsageThreadUpdate = (
+				sessionId: string,
+				usage: SessionUsage,
+				zeroFallback = false,
+			) => {
+				pendingUsageUpdatesRef.current.set(sessionId, { usage, zeroFallback });
+				if (usageFlushTimeoutRef.current !== null || disposedRef.current) {
+					return;
+				}
+				usageFlushTimeoutRef.current = window.setTimeout(() => {
+					usageFlushTimeoutRef.current = null;
+					if (
+						disposedRef.current ||
+						pendingUsageUpdatesRef.current.size === 0
+					) {
+						pendingUsageUpdatesRef.current.clear();
+						return;
+					}
+					const batch = new Map(pendingUsageUpdatesRef.current);
+					pendingUsageUpdatesRef.current.clear();
+					setThreads((current) => {
+						let changed = false;
+						const next = current.map((thread) => {
+							const entry = batch.get(thread.id);
+							if (!entry) {
+								return thread;
+							}
+							const { usage: nextUsage, zeroFallback: isZeroFallback } = entry;
+							if (
+								isZeroFallback
+									? thread.inputTokens === 0 &&
+										thread.outputTokens === 0 &&
+										(thread.totalCostUsd ?? 0) === 0
+									: thread.inputTokens === nextUsage.inputTokens &&
+										thread.outputTokens === nextUsage.outputTokens &&
+										thread.totalCostUsd === nextUsage.totalCostUsd
+							) {
+								return thread;
+							}
+							changed = true;
+							return { ...thread, ...nextUsage };
+						});
+						return changed ? next : current;
+					});
+				}, 0);
+			};
+
+			const fetchSessionUsage = async (
+				session: SessionHistoryItem,
+			): Promise<SessionUsage> => {
+				try {
+					const summary = await desktopClient.invoke<unknown>(
+						"read_session_usage_summary",
+						{
+							environmentId: session.environmentId,
+							sessionId: session.sessionId,
+							maxMessages: 1200,
+						},
+					);
+					const parsed = parseUsageSummaryResponse(summary);
+					if (parsed) {
+						return parsed;
+					}
+				} catch {
+					// Fallback below preserves compatibility with older sidecars/mocks.
+				}
+				const sessionMessages = await desktopClient.invoke<SessionMessage[]>(
+					"read_session_messages",
+					{
+						environmentId: session.environmentId,
+						sessionId: session.sessionId,
+						maxMessages: 1200,
+					},
+				);
+				const usage = summarizeUsageFromMessages(sessionMessages);
+				if (usage) {
+					return usage;
+				}
+				const events = await desktopClient.invoke<SessionHookEvent[]>(
+					"read_session_hooks",
+					{
+						environmentId: session.environmentId,
+						sessionId: session.sessionId,
+						limit: 1200,
+					},
+				);
+				return {
+					inputTokens: events.reduce(
+						(sum, event) => sum + (event.inputTokens ?? 0),
+						0,
+					),
+					outputTokens: events.reduce(
+						(sum, event) => sum + (event.outputTokens ?? 0),
+						0,
+					),
+					totalCostUsd: events.reduce(
+						(sum, event) => sum + (event.totalCost ?? 0),
+						0,
+					),
+				};
 			};
 
 			const startUsageFetch = (session: SessionHistoryItem): void => {
 				const sessionId = sessionKey(session);
 				usageLoadingRef.current.set(sessionId, session.status);
-				void desktopClient
-					.invoke<SessionMessage[]>("read_session_messages", {
-						environmentId: session.environmentId,
-						sessionId: session.sessionId,
-						maxMessages: 1200,
-					})
-					.then(async (sessionMessages): Promise<SessionUsage> => {
-						const usage = summarizeUsageFromMessages(sessionMessages);
-						if (!usage) {
-							const events = await desktopClient.invoke<SessionHookEvent[]>(
-								"read_session_hooks",
-								{
-									environmentId: session.environmentId,
-									sessionId: session.sessionId,
-									limit: 1200,
-								},
-							);
-							return {
-								inputTokens: events.reduce(
-									(sum, event) => sum + (event.inputTokens ?? 0),
-									0,
-								),
-								outputTokens: events.reduce(
-									(sum, event) => sum + (event.outputTokens ?? 0),
-									0,
-								),
-								totalCostUsd: events.reduce(
-									(sum, event) => sum + (event.totalCost ?? 0),
-									0,
-								),
-							};
-						}
-						return usage;
-					})
+				void fetchSessionUsage(session)
 					.then((usage) => {
 						usageByIdRef.current.set(sessionId, usage);
-						setThreads((current) =>
-							updateThreadById(current, sessionId, (thread) => {
-								if (
-									thread.inputTokens === usage.inputTokens &&
-									thread.outputTokens === usage.outputTokens &&
-									thread.totalCostUsd === usage.totalCostUsd
-								) {
-									return thread;
-								}
-								return { ...thread, ...usage };
-							}),
-						);
+						usageHydratedAtRef.current.set(sessionId, Date.now());
+						queueUsageThreadUpdate(sessionId, usage);
 					})
 					.catch(() => {
 						// A failed read on a row that was never hydrated is recorded
@@ -1209,18 +1309,8 @@ export function useSessionHistory({
 							totalCostUsd: 0,
 						};
 						usageByIdRef.current.set(sessionId, usage);
-						setThreads((current) =>
-							updateThreadById(current, sessionId, (thread) => {
-								if (
-									thread.inputTokens === 0 &&
-									thread.outputTokens === 0 &&
-									(thread.totalCostUsd ?? 0) === 0
-								) {
-									return thread;
-								}
-								return { ...thread, ...usage };
-							}),
-						);
+						usageHydratedAtRef.current.set(sessionId, Date.now());
+						queueUsageThreadUpdate(sessionId, usage, true);
 					})
 					.finally(() => {
 						// Record the status the read was started under, not the
@@ -1323,7 +1413,9 @@ export function useSessionHistory({
 			// let a fifth read start while the deleted row's read is still running.
 			titleLoadingRef.current.delete(sessionId);
 			usageHydratedStatusRef.current.delete(sessionId);
+			usageHydratedAtRef.current.delete(sessionId);
 			usageByIdRef.current.delete(sessionId);
+			pendingUsageUpdatesRef.current.delete(sessionId);
 			messageHydratedStatusRef.current.delete(sessionId);
 			setSessions((current) =>
 				current.filter((session) => sessionKey(session) !== sessionId),
@@ -1585,9 +1677,7 @@ export function useSessionHistory({
 					getSessionMetadataTitle(session.metadata),
 				);
 				const shouldHydrateStatus =
-					existing.status === "failed" ||
-					existing.status === "completed" ||
-					existing.status === "idle" ||
+					lastHydratedStatus === undefined ||
 					lastHydratedStatus !== session.status;
 				if ((!shouldHydrateTitle || hasManualTitle) && !shouldHydrateStatus) {
 					continue;

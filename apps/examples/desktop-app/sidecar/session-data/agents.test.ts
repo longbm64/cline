@@ -39,7 +39,11 @@ vi.mock("@cline/core", async () => {
 	};
 });
 
-import { listSessionAgents, readChildSessionMessages } from "./agents";
+import {
+	listSessionAgents,
+	readChildSessionMessages,
+	readChildSessionMessagesAsync,
+} from "./agents";
 
 let dir: string;
 
@@ -207,6 +211,33 @@ describe("readChildSessionMessages", () => {
 			}),
 		);
 		expect(readChildSessionMessages("root1__a")).toBeNull();
+	});
+
+	it("reads asynchronously and refreshes cached child messages when updated", async () => {
+		const path = writeMessages("a-async.json", [
+			{ role: "user", content: "first" },
+		]);
+		records.set(
+			"root1__a",
+			record({
+				sessionId: "root1__a",
+				agentId: "a",
+				messagesPath: path,
+			}),
+		);
+		const first = await readChildSessionMessagesAsync("root1__a");
+		expect(first).toHaveLength(1);
+
+		const second = await readChildSessionMessagesAsync("root1__a");
+		expect(second).toBe(first);
+
+		writeMessages("a-async.json", [
+			{ role: "user", content: "first" },
+			{ role: "assistant", content: "updated answer" },
+		]);
+		const updated = await readChildSessionMessagesAsync("root1__a");
+		expect(updated).toHaveLength(2);
+		expect(JSON.stringify(updated)).toContain("updated answer");
 	});
 });
 

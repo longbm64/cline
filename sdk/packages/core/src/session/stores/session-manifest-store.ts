@@ -88,6 +88,7 @@ function sessionRowFromManifest(
 
 export class SessionManifestStore {
 	readonly artifacts: SessionArtifacts;
+	private readonly messageWriteTails = new Map<string, Promise<void>>();
 
 	constructor(
 		private readonly adapter: SessionPersistenceAdapter,
@@ -217,41 +218,57 @@ export class SessionManifestStore {
 		return adopted;
 	}
 
-	async persistSessionMessages(
+	persistSessionMessages(
 		sessionId: string,
 		messages: LlmsProviders.MessageWithMetadata[],
 		systemPrompt?: string,
 	): Promise<void> {
-		const row = await this.resolveSessionRow(sessionId);
-		const path =
-			typeof row.messagesPath === "string" && row.messagesPath.trim().length > 0
-				? row.messagesPath
-				: this.artifacts.sessionMessagesPath(sessionId);
-		const payload = buildMessagesFilePayload({
-			updatedAt: nowIso(),
-			context: resolveMessagesFileContext(row),
-			messages: messages as StoredMessageWithMetadata[],
-			systemPrompt,
-		});
-		const contents = `${JSON.stringify(payload, null, 2)}\n`;
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, contents, "utf8");
-		if (!this.messagesArtifactUploader) {
-			return;
-		}
-		try {
-			await this.messagesArtifactUploader.uploadMessagesFile({
-				sessionId,
-				path,
-				contents,
-				row,
+		const previous = this.messageWriteTails.get(sessionId) ?? Promise.resolve();
+		const run = previous
+			.catch(() => undefined)
+			.then(async () => {
+				const row = await this.resolveSessionRow(sessionId);
+				const path =
+					typeof row.messagesPath === "string" &&
+					row.messagesPath.trim().length > 0
+						? row.messagesPath
+						: this.artifacts.sessionMessagesPath(sessionId);
+				const payload = buildMessagesFilePayload({
+					updatedAt: nowIso(),
+					context: resolveMessagesFileContext(row),
+					messages: messages as StoredMessageWithMetadata[],
+					systemPrompt,
+				});
+				const contents = `${JSON.stringify(payload, null, 2)}\n`;
+				// Async atomic write prevents blocking the event loop on large transcripts
+				// and ensures concurrent readers never observe partially written JSON.
+				await writeFileAtomic(path, contents);
+				if (!this.messagesArtifactUploader) {
+					return;
+				}
+				try {
+					await this.messagesArtifactUploader.uploadMessagesFile({
+						sessionId,
+						path,
+						contents,
+						row,
+					});
+				} catch (error) {
+					this.logger?.debug("Failed to upload persisted session messages", {
+						sessionId,
+						error,
+					});
+				}
 			});
-		} catch (error) {
-			this.logger?.debug("Failed to upload persisted session messages", {
-				sessionId,
-				error,
+		const tail = run
+			.catch(() => undefined)
+			.finally(() => {
+				if (this.messageWriteTails.get(sessionId) === tail) {
+					this.messageWriteTails.delete(sessionId);
+				}
 			});
-		}
+		this.messageWriteTails.set(sessionId, tail);
+		return run;
 	}
 
 	private resolveCompactionPath(sessionId: string): string {

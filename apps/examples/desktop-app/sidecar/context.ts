@@ -131,6 +131,79 @@ function nowMs(): number {
 	return Date.now();
 }
 
+type ClientSessionStreamFilter = {
+	sessionId: string | null;
+	environmentId?: string;
+};
+
+const clientSessionStreamFilters = new WeakMap<
+	SidecarWebSocketClient,
+	ClientSessionStreamFilter
+>();
+
+// Boundary/lifecycle chat_event streams still needed by background subscribers
+// (tray indicator, completion notifications, queued turn starts, unread state).
+const BACKGROUND_PASS_THROUGH_CHAT_STREAMS = new Set([
+	"chat_done",
+	"chat_queued_prompt_start",
+	"chat_error",
+]);
+
+export function setClientSessionStreamFilter(
+	client: SidecarWebSocketClient,
+	sessionId: string | null,
+	environmentId?: string,
+): void {
+	clientSessionStreamFilters.set(client, {
+		sessionId: sessionId?.trim() || null,
+		environmentId: environmentId?.trim() || undefined,
+	});
+}
+
+export function hasClientSessionStreamFilter(
+	client: SidecarWebSocketClient,
+): boolean {
+	return clientSessionStreamFilters.has(client);
+}
+
+function shouldDeliverEventToClient(
+	client: SidecarWebSocketClient,
+	name: string,
+	payloadRecord: Record<string, unknown> | undefined,
+): boolean {
+	if (name !== "chat_event" && name !== "subagent_chat_event") {
+		return true;
+	}
+	const filter = clientSessionStreamFilters.get(client);
+	if (!filter) {
+		return true;
+	}
+	if (name === "chat_event") {
+		const stream =
+			typeof payloadRecord?.stream === "string" ? payloadRecord.stream : "";
+		if (BACKGROUND_PASS_THROUGH_CHAT_STREAMS.has(stream)) {
+			return true;
+		}
+	}
+	const payloadSessionId =
+		typeof payloadRecord?.sessionId === "string"
+			? payloadRecord.sessionId.trim()
+			: "";
+	if (!filter.sessionId || payloadSessionId !== filter.sessionId) {
+		return false;
+	}
+	if (filter.environmentId) {
+		const payloadEnvironmentId =
+			typeof payloadRecord?.environmentId === "string"
+				? payloadRecord.environmentId.trim()
+				: "";
+		if (payloadEnvironmentId && payloadEnvironmentId !== filter.environmentId) {
+			return false;
+		}
+	}
+	return true;
+}
+
 export function encodeSidecarEvent(name: string, payload: unknown): string {
 	return JSON.stringify({
 		type: "event",
@@ -139,8 +212,17 @@ export function encodeSidecarEvent(name: string, payload: unknown): string {
 }
 
 function sendEvent(ctx: SidecarContext, name: string, payload: unknown): void {
-	const encoded = encodeSidecarEvent(name, sessionEventPayload(ctx, payload));
+	const resolvedPayload = sessionEventPayload(ctx, payload);
+	const payloadRecord =
+		resolvedPayload && typeof resolvedPayload === "object"
+			? (resolvedPayload as Record<string, unknown>)
+			: undefined;
+	let encoded: string | undefined;
 	for (const client of ctx.wsClients) {
+		if (!shouldDeliverEventToClient(client, name, payloadRecord)) {
+			continue;
+		}
+		encoded ??= encodeSidecarEvent(name, resolvedPayload);
 		try {
 			client.send(encoded);
 		} catch {
@@ -219,25 +301,65 @@ export function syncSidecarApprovalReadiness(
 	});
 }
 
-// Session log appends are chained per session so writes stay ordered, but
-// they run asynchronously: a synchronous write per streamed token would stall
-// the sidecar event loop (and therefore every pending UI command) under load.
+// Session log appends are buffered briefly and chained per session so writes
+// stay ordered and asynchronous without spawning a mkdir/appendFile syscall per
+// streamed token on the shared event loop.
+const SESSION_LOG_FLUSH_INTERVAL_MS = 250;
+const SESSION_LOG_FLUSH_MAX_LINES = 32;
 const sessionLogWriteTails = new Map<string, Promise<void>>();
+const sessionLogEnsuredDirs = new Set<string>();
+const sessionLogBuffers = new Map<
+	string,
+	{ lines: string[]; timer: ReturnType<typeof setTimeout> | null }
+>();
 
-function appendSessionChunk(
+async function writeSessionLogBatch(
+	path: string,
+	payload: string,
+): Promise<void> {
+	const dir = dirname(path);
+	if (!sessionLogEnsuredDirs.has(dir)) {
+		await mkdir(dir, { recursive: true });
+		sessionLogEnsuredDirs.add(dir);
+	}
+	try {
+		await appendFile(path, payload);
+	} catch (error) {
+		const code =
+			error && typeof error === "object"
+				? (error as { code?: unknown }).code
+				: undefined;
+		if (code !== "ENOENT") {
+			throw error;
+		}
+		// Directory may have been removed externally; re-create once and retry.
+		sessionLogEnsuredDirs.delete(dir);
+		await mkdir(dir, { recursive: true });
+		sessionLogEnsuredDirs.add(dir);
+		await appendFile(path, payload);
+	}
+}
+
+function flushSessionLogChunksForSession(
 	sessionId: string,
-	stream: string,
-	chunk: string,
-	ts: number,
-): void {
+): Promise<void> | undefined {
+	const buffer = sessionLogBuffers.get(sessionId);
+	if (!buffer) {
+		return sessionLogWriteTails.get(sessionId);
+	}
+	if (buffer.timer) {
+		clearTimeout(buffer.timer);
+		buffer.timer = null;
+	}
+	sessionLogBuffers.delete(sessionId);
+	if (buffer.lines.length === 0) {
+		return sessionLogWriteTails.get(sessionId);
+	}
 	const path = sessionLogPath(sessionId);
-	const line = `${JSON.stringify({ ts, stream, chunk })}\n`;
+	const payload = buffer.lines.join("");
 	const tail = sessionLogWriteTails.get(sessionId) ?? Promise.resolve();
 	const next = tail
-		.then(async () => {
-			await mkdir(dirname(path), { recursive: true });
-			await appendFile(path, line);
-		})
+		.then(() => writeSessionLogBatch(path, payload))
 		.catch(() => {
 			// Session logs are best-effort diagnostics; never fail the stream.
 		});
@@ -247,6 +369,51 @@ function appendSessionChunk(
 			sessionLogWriteTails.delete(sessionId);
 		}
 	});
+	return next;
+}
+
+export async function flushSessionLogChunks(sessionId?: string): Promise<void> {
+	if (sessionId !== undefined) {
+		await flushSessionLogChunksForSession(sessionId);
+		return;
+	}
+	const pending: Array<Promise<void>> = [];
+	for (const bufferedSessionId of [...sessionLogBuffers.keys()]) {
+		const flushed = flushSessionLogChunksForSession(bufferedSessionId);
+		if (flushed) {
+			pending.push(flushed);
+		}
+	}
+	for (const tail of sessionLogWriteTails.values()) {
+		pending.push(tail);
+	}
+	await Promise.allSettled(pending);
+}
+
+function appendSessionChunk(
+	sessionId: string,
+	stream: string,
+	chunk: string,
+	ts: number,
+): void {
+	const line = `${JSON.stringify({ ts, stream, chunk })}\n`;
+	let buffer = sessionLogBuffers.get(sessionId);
+	if (!buffer) {
+		buffer = { lines: [], timer: null };
+		sessionLogBuffers.set(sessionId, buffer);
+	}
+	buffer.lines.push(line);
+	if (buffer.lines.length >= SESSION_LOG_FLUSH_MAX_LINES) {
+		void flushSessionLogChunksForSession(sessionId);
+		return;
+	}
+	if (!buffer.timer) {
+		const timer = setTimeout(() => {
+			void flushSessionLogChunksForSession(sessionId);
+		}, SESSION_LOG_FLUSH_INTERVAL_MS);
+		timer.unref?.();
+		buffer.timer = timer;
+	}
 }
 
 function emitChunk(
@@ -851,6 +1018,7 @@ export async function disposeSidecarContext(
 	ctx: SidecarContext,
 	reason = "code_sidecar_shutdown",
 ): Promise<void> {
+	await flushSessionLogChunks();
 	const cleanup: Array<Promise<unknown>> = [];
 	const approvalCleanup: Array<Promise<unknown>> = [];
 

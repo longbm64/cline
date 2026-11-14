@@ -1239,6 +1239,65 @@ describe("useSessionHistory usage hydration", () => {
 		expect(readsOfRunning()).toBe(2);
 		expect(readIds).toHaveLength(12);
 	});
+
+	it("uses read_session_usage_summary directly and avoids re-hydrating unchanged completed status", async () => {
+		const calls: Array<{ command: string; maxMessages?: number }> = [];
+		invokeMock.mockImplementation(async (command: string, args?: ReadArgs) => {
+			if (command === "list_discovered_sessions") {
+				return await new Promise<unknown[]>((resolve, reject) => {
+					pendingLists.push({ limit: args?.limit ?? 0, resolve, reject });
+				});
+			}
+			calls.push({ command, maxMessages: args?.maxMessages });
+			if (command === "read_session_usage_summary") {
+				return { inputTokens: 320, outputTokens: 45, totalCostUsd: 0.042 };
+			}
+			if (command === "read_session_messages") {
+				return usageMessages(0);
+			}
+			return [];
+		});
+
+		await renderWithRows(1);
+		await flush(1250);
+		await settle();
+
+		expect(
+			calls.some((call) => call.command === "read_session_usage_summary"),
+		).toBe(true);
+		expect(
+			calls.filter(
+				(call) =>
+					call.command === "read_session_messages" && call.maxMessages === 1200,
+			),
+		).toHaveLength(0);
+		expect(current.threads[0]).toMatchObject({
+			inputTokens: 320,
+			outputTokens: 45,
+			totalCostUsd: 0.042,
+		});
+
+		const statusReadsBeforePoll = calls.filter(
+			(call) =>
+				call.command === "read_session_messages" && call.maxMessages === 80,
+		).length;
+		await flush(12_000);
+		await flush();
+		await act(async () => {
+			pendingLists[1].resolve([
+				{ ...usageRow(0), prompt: "Updated prompt only" },
+			]);
+			await Promise.resolve();
+		});
+		await flush(1250);
+		await settle();
+
+		const statusReadsAfterPoll = calls.filter(
+			(call) =>
+				call.command === "read_session_messages" && call.maxMessages === 80,
+		).length;
+		expect(statusReadsAfterPoll).toBe(statusReadsBeforePoll);
+	});
 });
 
 describe("useSessionHistory background hydration", () => {

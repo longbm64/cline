@@ -4,7 +4,8 @@ import { type AppZoomAction, isAppZoomAction } from "@/lib/app-font-size";
 import { desktopClient, isTauriAvailable } from "@/lib/desktop-client";
 
 export const DESKTOP_ACTION_PENDING_EVENT = "desktop-action-pending";
-const TRAY_STATUS_REFRESH_INTERVAL_MS = 5_000;
+const TRAY_STATUS_REFRESH_INTERVAL_MS = 15_000;
+const TRAY_STATUS_EVENT_DEBOUNCE_MS = 1_000;
 
 export type DesktopAction =
 	| { type: "new-session" }
@@ -116,13 +117,20 @@ export function subscribeToDesktopActions(
 	};
 }
 
-async function refreshDesktopTrayStatus(): Promise<void> {
+type TrayStatusSnapshot = {
+	hubHealthy: boolean;
+	runningSessions: number;
+};
+
+async function refreshDesktopTrayStatus(
+	lastSnapshot?: TrayStatusSnapshot | null,
+): Promise<TrayStatusSnapshot | null> {
 	let context: ProcessContext;
 	try {
 		context = await desktopClient.invoke<ProcessContext>("get_process_context");
 	} catch {
 		// Preserve the last known status during transient sidecar reconnects.
-		return;
+		return null;
 	}
 
 	let runningSessions = 0;
@@ -132,14 +140,22 @@ async function refreshDesktopTrayStatus(): Promise<void> {
 	) {
 		runningSessions = Math.max(0, Math.floor(context.runningSessionCount));
 	}
+	const hubHealthy = context.hub?.status === "connected";
+	if (
+		lastSnapshot &&
+		lastSnapshot.hubHealthy === hubHealthy &&
+		lastSnapshot.runningSessions === runningSessions
+	) {
+		return lastSnapshot;
+	}
 
+	const nextSnapshot: TrayStatusSnapshot = { hubHealthy, runningSessions };
 	try {
-		await desktopClient.invoke("set_tray_status", {
-			hubHealthy: context.hub?.status === "connected",
-			runningSessions,
-		});
+		await desktopClient.invoke("set_tray_status", nextSnapshot);
+		return nextSnapshot;
 	} catch {
 		// Tray status is best-effort and unavailable in the browser-only shell.
+		return null;
 	}
 }
 
@@ -150,26 +166,40 @@ export function watchDesktopTrayStatus(): () => void {
 
 	let stopped = false;
 	let refreshing = false;
+	let debounceTimer: number | null = null;
+	let lastSnapshot: TrayStatusSnapshot | null = null;
 	const refresh = async () => {
 		if (stopped || refreshing) {
 			return;
 		}
 		refreshing = true;
 		try {
-			await refreshDesktopTrayStatus();
+			const updated = await refreshDesktopTrayStatus(lastSnapshot);
+			if (updated) {
+				lastSnapshot = updated;
+			}
 		} finally {
 			refreshing = false;
 		}
+	};
+	const scheduleRefresh = () => {
+		if (stopped || debounceTimer !== null) {
+			return;
+		}
+		debounceTimer = window.setTimeout(() => {
+			debounceTimer = null;
+			void refresh();
+		}, TRAY_STATUS_EVENT_DEBOUNCE_MS);
 	};
 
 	void refresh();
 	const unsubscribeStatus = desktopClient.subscribe(
 		"chat_session_status",
-		() => void refresh(),
+		scheduleRefresh,
 	);
 	const unsubscribeEnded = desktopClient.subscribe(
 		"chat_session_ended",
-		() => void refresh(),
+		scheduleRefresh,
 	);
 	const unsubscribeChatEvents = desktopClient.subscribe(
 		"chat_event",
@@ -179,17 +209,23 @@ export function watchDesktopTrayStatus(): () => void {
 				typeof payload === "object" &&
 				(payload as { stream?: unknown }).stream === "chat_done"
 			) {
-				void refresh();
+				scheduleRefresh();
 			}
 		},
 	);
-	const interval = window.setInterval(
-		() => void refresh(),
-		TRAY_STATUS_REFRESH_INTERVAL_MS,
-	);
+	const interval = window.setInterval(() => {
+		if (typeof document !== "undefined" && document.hidden) {
+			return;
+		}
+		void refresh();
+	}, TRAY_STATUS_REFRESH_INTERVAL_MS);
 
 	return () => {
 		stopped = true;
+		if (debounceTimer !== null) {
+			window.clearTimeout(debounceTimer);
+			debounceTimer = null;
+		}
 		unsubscribeStatus();
 		unsubscribeEnded();
 		unsubscribeChatEvents();

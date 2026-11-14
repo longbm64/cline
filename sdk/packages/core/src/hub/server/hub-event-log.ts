@@ -15,7 +15,11 @@
 
 import { join } from "node:path";
 import type { HubEventEnvelope } from "@cline/shared";
-import { loadSqliteDb, type SqliteDb } from "@cline/shared/db";
+import {
+	loadSqliteDb,
+	type SqliteDb,
+	type SqliteStatement,
+} from "@cline/shared/db";
 import { resolveDbDataDir } from "@cline/shared/storage";
 
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -23,6 +27,8 @@ const DEFAULT_MAX_ROWS = 200_000;
 const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 /** Appended bytes between sweeps; the hourly timer alone can't keep up with bursts. */
 const PRUNE_EVERY_APPENDED_BYTES = 16 * 1024 * 1024;
+const BATCH_FLUSH_INTERVAL_MS = 50;
+const BATCH_FLUSH_MAX_ROWS = 64;
 
 export interface HubEventLogOptions {
 	/** Database file. Defaults to an owner-scoped `<data>/db/hub-events-*.db`; use ":memory:" in tests. */
@@ -53,11 +59,24 @@ export function resolveHubEventLogPath(ownerId?: string): string {
 	);
 }
 
+type PendingEventRow = {
+	sequence: number;
+	event: string;
+	sessionId: string | null;
+	envelopeJson: string;
+	createdAt: number;
+};
+
 export class HubEventLogStore {
 	private readonly db: SqliteDb;
 	private readonly retentionMs: number;
 	private readonly maxRows: number;
 	private readonly maxTotalBytes: number;
+	private readonly insertStmt: SqliteStatement;
+	private readonly lastSequenceStmt: SqliteStatement;
+	private readonly pending: PendingEventRow[] = [];
+	private flushTimer: ReturnType<typeof setTimeout> | undefined;
+	private nextSequence: number;
 	private appendedBytesSincePrune = 0;
 	private closed = false;
 
@@ -89,39 +108,109 @@ export class HubEventLogStore {
 			CREATE INDEX IF NOT EXISTS idx_hub_events_created
 				ON hub_events(created_at);
 		`);
+		this.insertStmt = this.db.prepare(
+			`INSERT INTO hub_events (sequence, event, session_id, envelope_json, created_at)
+			 VALUES (?, ?, ?, ?, ?);`,
+		);
+		this.lastSequenceStmt = this.db.prepare(
+			"SELECT MAX(sequence) AS sequence FROM hub_events;",
+		);
+		const maxRow = this.lastSequenceStmt.get();
+		let sqliteSeq = 0;
+		try {
+			const seqRow = this.db
+				.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'hub_events';")
+				.get();
+			sqliteSeq = Number(seqRow?.seq ?? 0);
+		} catch {
+			// sqlite_sequence is created only after the first AUTOINCREMENT insert.
+		}
+		this.nextSequence = Math.max(Number(maxRow?.sequence ?? 0), sqliteSeq) + 1;
 	}
 
 	/**
 	 * Append a durable event and return it stamped with its global sequence.
-	 * The returned envelope (not the input) is what must be fanned out so
-	 * live listeners and replaying clients observe identical frames.
+	 * Inserts are queued briefly and committed in a single SQLite transaction
+	 * to avoid one WAL transaction per streamed chunk, while reads/prune/close
+	 * flush synchronously so durability and replay ordering stay exact.
 	 */
 	append(envelope: HubEventEnvelope): HubEventEnvelope {
 		if (this.closed) {
 			return envelope;
 		}
+		const sequence = this.nextSequence;
+		this.nextSequence += 1;
 		const createdAt = envelope.timestamp ?? Date.now();
 		// Stored without `sequence`; stamped from the rowid on read/return.
 		const envelopeJson = JSON.stringify(envelope);
-		const inserted = this.db
-			.prepare(
-				`INSERT INTO hub_events (event, session_id, envelope_json, created_at)
-				 VALUES (?, ?, ?, ?);`,
-			)
-			.run(envelope.event, envelope.sessionId ?? null, envelopeJson, createdAt);
-		// The AUTOINCREMENT primary key IS the sequence, so the insert's own
-		// rowid stamps it without a second round-trip per streaming chunk.
-		const rowid = inserted?.lastInsertRowid;
-		const sequence =
-			typeof rowid === "number" || typeof rowid === "bigint"
-				? Number(rowid)
-				: this.lastSequence();
+		this.pending.push({
+			sequence,
+			event: envelope.event,
+			sessionId: envelope.sessionId ?? null,
+			envelopeJson,
+			createdAt,
+		});
 		this.appendedBytesSincePrune += Buffer.byteLength(envelopeJson);
-		if (this.appendedBytesSincePrune >= PRUNE_EVERY_APPENDED_BYTES) {
-			this.appendedBytesSincePrune = 0;
-			this.prune();
+		if (
+			this.pending.length >= BATCH_FLUSH_MAX_ROWS ||
+			this.appendedBytesSincePrune >= PRUNE_EVERY_APPENDED_BYTES
+		) {
+			this.flush();
+		} else if (!this.flushTimer) {
+			this.flushTimer = setTimeout(() => {
+				this.flushTimer = undefined;
+				this.flush();
+			}, BATCH_FLUSH_INTERVAL_MS);
+			this.flushTimer.unref?.();
 		}
 		return { ...envelope, sequence };
+	}
+
+	/** Flush buffered event inserts in a single SQLite transaction. */
+	flush(): void {
+		if (this.flushTimer) {
+			clearTimeout(this.flushTimer);
+			this.flushTimer = undefined;
+		}
+		if (this.closed || this.pending.length === 0) {
+			return;
+		}
+		const batch = this.pending.splice(0);
+		if (batch.length === 1) {
+			const row = batch[0]!;
+			this.insertStmt.run(
+				row.sequence,
+				row.event,
+				row.sessionId,
+				row.envelopeJson,
+				row.createdAt,
+			);
+		} else {
+			this.db.exec("BEGIN IMMEDIATE;");
+			try {
+				for (const row of batch) {
+					this.insertStmt.run(
+						row.sequence,
+						row.event,
+						row.sessionId,
+						row.envelopeJson,
+						row.createdAt,
+					);
+				}
+				this.db.exec("COMMIT;");
+			} catch (error) {
+				try {
+					this.db.exec("ROLLBACK;");
+				} catch {
+					// Preserve original transaction failure.
+				}
+				throw error;
+			}
+		}
+		if (this.appendedBytesSincePrune >= PRUNE_EVERY_APPENDED_BYTES) {
+			this.appendedBytesSincePrune = 0;
+			this.pruneInternal(Date.now());
+		}
 	}
 
 	/** Events after `sequence`, oldest first, optionally scoped to a session. */
@@ -133,6 +222,7 @@ export class HubEventLogStore {
 		if (this.closed) {
 			return [];
 		}
+		this.flush();
 		const clauses = ["sequence > ?"];
 		const params: unknown[] = [sequence];
 		if (scope.sessionId) {
@@ -162,9 +252,8 @@ export class HubEventLogStore {
 		if (this.closed) {
 			return 0;
 		}
-		const row = this.db
-			.prepare("SELECT MAX(sequence) AS sequence FROM hub_events;")
-			.get();
+		this.flush();
+		const row = this.lastSequenceStmt.get();
 		return Number(row?.sequence ?? 0);
 	}
 
@@ -173,6 +262,11 @@ export class HubEventLogStore {
 		if (this.closed) {
 			return;
 		}
+		this.flush();
+		this.pruneInternal(now);
+	}
+
+	private pruneInternal(now: number): void {
 		this.db
 			.prepare("DELETE FROM hub_events WHERE created_at < ?;")
 			.run(now - this.retentionMs);
@@ -226,7 +320,11 @@ export class HubEventLogStore {
 		if (this.closed) {
 			return;
 		}
-		this.closed = true;
-		this.db.close?.();
+		try {
+			this.flush();
+		} finally {
+			this.closed = true;
+			this.db.close?.();
+		}
 	}
 }

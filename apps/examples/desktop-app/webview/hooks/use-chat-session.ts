@@ -1912,13 +1912,12 @@ export function useChatSession(
 
 	const handleIncomingChunk = useCallback(
 		(payload: AgentChunkEvent) => {
-			if (!RELEVANT_STREAMS.has(payload.stream)) return;
-			if (!shouldApplyStreamChunk(payload)) return;
-
 			const listeningSessionId = activeSessionIdRef.current;
 			if (!listeningSessionId || payload.sessionId !== listeningSessionId) {
 				return;
 			}
+			if (!RELEVANT_STREAMS.has(payload.stream)) return;
+			if (!shouldApplyStreamChunk(payload)) return;
 			lastLiveChunkAtRef.current = Date.now();
 			if (abortedRef.current) {
 				if (payload.stream === "chat_queued_prompt_start") {

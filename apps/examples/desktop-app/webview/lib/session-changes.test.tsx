@@ -12,13 +12,23 @@ let container: HTMLDivElement;
 let root: Root;
 let latest: ReturnType<typeof useSessionChanges>;
 
-function Probe({ refreshKey }: { refreshKey: string }) {
+function Probe({
+	refreshKey,
+	isRunning,
+	changesPanelOpen,
+}: {
+	refreshKey: string;
+	isRunning?: boolean;
+	changesPanelOpen?: boolean;
+}) {
 	latest = useSessionChanges({
 		enabled: true,
 		environmentId: "local",
 		sessionId: "s1",
 		cwd: "/repo",
 		refreshKey,
+		isRunning,
+		changesPanelOpen,
 	});
 	return null;
 }
@@ -64,5 +74,47 @@ describe("useSessionChanges", () => {
 		await act(async () => vi.advanceTimersByTimeAsync(400));
 		expect(latest.current).toBe(true);
 		expect(latest.changes?.lastTurn?.files[0]?.path).toBe("b.ts");
+	});
+
+	it("throttles git change refreshes while running with the Changes panel closed and flushes on panel open or completion", async () => {
+		invokeMock.mockResolvedValue(changes("live.ts"));
+		await act(async () =>
+			root.render(
+				<Probe refreshKey="running:1:1" isRunning changesPanelOpen={false} />,
+			),
+		);
+		await act(async () => vi.advanceTimersByTimeAsync(1_000));
+		expect(invokeMock).not.toHaveBeenCalled();
+
+		// Opening the Changes panel switches immediately to the 400ms cadence.
+		await act(async () =>
+			root.render(
+				<Probe refreshKey="running:1:1" isRunning changesPanelOpen />,
+			),
+		);
+		await act(async () => vi.advanceTimersByTimeAsync(400));
+		expect(invokeMock).toHaveBeenCalledTimes(1);
+
+		// Closing the panel while running throttles subsequent tool bursts to 2500ms,
+		// and settling cancels that delay to refresh within 400ms.
+		await act(async () =>
+			root.render(
+				<Probe refreshKey="running:1:2" isRunning changesPanelOpen={false} />,
+			),
+		);
+		await act(async () => vi.advanceTimersByTimeAsync(500));
+		expect(invokeMock).toHaveBeenCalledTimes(1);
+
+		await act(async () =>
+			root.render(
+				<Probe
+					refreshKey="completed:1:2"
+					isRunning={false}
+					changesPanelOpen={false}
+				/>,
+			),
+		);
+		await act(async () => vi.advanceTimersByTimeAsync(400));
+		expect(invokeMock).toHaveBeenCalledTimes(2);
 	});
 });

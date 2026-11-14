@@ -139,4 +139,39 @@ describe("HubEventLogStore", () => {
 		expect(log.listAfter(0, {}, 10)).toEqual([]);
 		expect(() => log.append(envelope("run.completed", "s1"))).not.toThrow();
 	});
+
+	it("flushes batched appends after timer/batch threshold and preserves sequence across reopen after full prune", async () => {
+		const dbPath = join(
+			mkdtempSync(join(tmpdir(), "cline-hub-events-")),
+			"hub-events.db",
+		);
+		const first = new HubEventLogStore({ dbPath, retentionMs: 100 });
+		for (let i = 0; i < 70; i += 1) {
+			const stamped = first.append({
+				...envelope("assistant.delta", "s1", { i }),
+				timestamp: 1000,
+			});
+			expect(stamped.sequence).toBe(i + 1);
+		}
+		first.prune(10_000);
+		expect(first.listAfter(0, {}, 100)).toEqual([]);
+		first.close();
+
+		const reopened = new HubEventLogStore({ dbPath });
+		const next = reopened.append(envelope("run.started", "s1"));
+		expect(next.sequence).toBe(71);
+
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		reopened.close();
+
+		const db = loadSqliteDb(dbPath);
+		try {
+			const row = db
+				.prepare("SELECT MAX(sequence) AS sequence FROM hub_events;")
+				.get();
+			expect(Number(row?.sequence)).toBe(71);
+		} finally {
+			db.close?.();
+		}
+	});
 });
